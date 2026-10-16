@@ -20,13 +20,12 @@ except Exception:
 st.set_page_config(page_title="Gerador de Audiolivros com IA", page_icon="🎧", layout="centered")
 
 st.title("🎧 Conversor de Livros para Audiolivro (IA Avançada)")
-st.markdown("Converte o teu livro em partes com limpeza automática de guião e alta expressividade.")
+st.markdown("Converte o teu livro em partes, limpa automaticamente instruções de guião/cenas e carateres especiais, e descarrega o áudio **à medida que vai sendo gerado**.")
 
 # --- BARRA LATERAL: CONFIGURAÇÕES ---
 with st.sidebar:
     st.header("⚙️ Configurações de Voz e IA")
     
-    # Seleção do Motor
     motores_disponiveis = ["Edge-TTS (Rápido e Estável)"]
     if KOKORO_DISPONIVEL:
         motores_disponiveis.insert(0, "Kokoro-82M (IA Hiper-Realista)")
@@ -79,24 +78,41 @@ with st.sidebar:
         help="Garante a continuidade entre as partes individuais."
     )
 
-# --- FUNÇÃO DE LIMPEZA DE GUIÕES E INSTRUÇÕES ---
+# --- FUNÇÃO DE LIMPEZA AVANÇADA DE GUIÕES E SEPARADORES ---
 def limpar_instrucoes_guiom(texto: str) -> str:
+    """
+    Remove marcações de guião, cabeçalhos, e sequências de símbolos 
+    como ================== ou ----------- para evitar que sejam lidas.
+    """
+    # 1. Remove blocos entre parênteses rectos [MÚSICA:...], [P: 3s], etc.
     texto_limpo = re.sub(r'\[.*?\]', '', texto)
+    
     linhas = texto_limpo.split('\n')
     linhas_filtradas = []
     
     padroes_ignorar = re.compile(
-        r'^(CAPÍTULO\s+\d+|PARTE\s+[A-ZÀ-Ú]+|O CONCEITO|A CIÊNCIA|A FERRAMENTA|REFLEXÃO|A PONTE|FIM DO CAPÍTULO|DURAÇÃO ESTIMADA|FORMATO|MÚSICA|PAUSAS|ESTRUTURA POR CAPÍTULO|TOM GERAL|=+)',
+        r'^(CAPÍTULO\s+\d+|PARTE\s+[A-ZÀ-Ú]+|O CONCEITO|A CIÊNCIA|A FERRAMENTA|REFLEXÃO|A PONTE|FIM DO CAPÍTULO|DURAÇÃO ESTIMADA|FORMATO|MÚSICA|PAUSAS|ESTRUTURA POR CAPÍTULO|TOM GERAL)',
         re.IGNORECASE
     )
     
     for linha in linhas:
         linha_strip = linha.strip()
-        if padroes_ignorar.match(linha_strip) or re.match(r'^=+$', linha_strip):
+        
+        # Ignora linhas compostas apenas por símbolos repetidos (=, -, _, *, etc.)
+        if re.match(r'^[=\-_*#]{3,}$', linha_strip):
             continue
+            
+        # Ignora cabeçalhos estruturais conhecidos
+        if padroes_ignorar.match(linha_strip):
+            continue
+            
         linhas_filtradas.append(linha)
         
-    return "\n".join(linhas_filtradas)
+    # Junta tudo e remove eventuais resíduos de múltiplos sinais de igual ou traços isolados no texto
+    texto_final = "\n".join(linhas_filtradas)
+    texto_final = re.sub(r'[=\-_*#]{3,}', '', texto_final)
+    
+    return texto_final
 
 # --- FUNÇÃO DE EXTRAÇÃO UNIVERSAL BLINDADA ---
 def extrair_documento_universal(file_bytes: bytes, extensao: str) -> str:
@@ -222,7 +238,7 @@ if uploaded_file is not None:
         st.session_state.arquivos_partes = []
         st.session_state.audio_completo = None
 
-    with st.spinner("A analisar e a limpar instruções do guião..."):
+    with st.spinner("A analisar e a limpar instruções e separadores do guião..."):
         texto_extraido = extrair_documento_universal(file_bytes, extensao)
         todas_as_frases = separar_em_frases(texto_extraido)
         partes_limpas = dividir_partes_base(todas_as_frases, chars_por_parte)
@@ -237,7 +253,7 @@ if uploaded_file is not None:
         col2.metric("Total de Frases", f"{len(todas_as_frases):,}")
         col3.metric("Partes Calculadas", total_partes)
         
-        with st.expander("🔍 Pré-visualizar Texto Limpo (Sem Instruções de Guião)"):
+        with st.expander("🔍 Pré-visualizar Texto Limpo (Sem Separadores nem Instruções)"):
             st.write(texto_extraido[:1000] + "...")
         
         st.subheader("🎯 Intervalo a Processar")
