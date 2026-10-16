@@ -13,8 +13,8 @@ st.set_page_config(page_title="Estúdio Profissional de Audiolivros ACX", page_i
 
 st.title("🎧 Estúdio Profissional de Audiolivros — Padrão ACX (192 kbps, Estéreo)")
 st.markdown(
-    "Processamento avançado com **conversão interna por FFmpeg** para garantir "
-    "192 kbps, 44.1 kHz Estéreo, ritmo natural (-10%) e ausência de restrições de qualidade."
+    "Processamento avançado com **conversão interna limpa por FFmpeg** para garantir "
+    "192 kbps, 44.1 kHz Estéreo, ritmo natural (-10%) e total conformidade com a ACX."
 )
 
 # --- FUNÇÃO PARA LIMPAR NOMES DE FICHEIROS ---
@@ -24,7 +24,7 @@ def limpar_nome_ficheiro(texto: str) -> str:
     texto = re.sub(r'[^\w_]', '', texto)
     return texto.lower()
 
-# --- PARSER CÉNICO POR CAPÍTULOS ---
+# --- PARSER CÉNICO ROBUSTO POR CAPÍTULOS ---
 def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) -> list[dict]:
     linhas = texto_bruto.split('\n')
     capitulos = []
@@ -33,7 +33,7 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
     parte_pendente = None
 
     rate_atual = "-10%"
-    pitch_atual = "-1Hz"
+    pitch_atual = "-2Hz"
     buffer_fala = []
 
     em_cabecalho_inicial = True
@@ -239,9 +239,9 @@ async def obter_frame_silencio_nativo(voice: str) -> bytes:
         pass
     return b'\x00' * 320
 
-# --- MOTOR DE GRAVAÇÃO E CONVERSÃO PROFISSIONAL VIA FFMPEG ---
+# --- MOTOR DE GRAVAÇÃO E CONVERSÃO ACX ---
 async def gravar_e_converter_acx(segmentos_cap: list[dict], voice: str) -> bytes:
-    buffer_wav = io.BytesIO()
+    buffer_audio = io.BytesIO()
     silencio_base = None
 
     for b in segmentos_cap:
@@ -250,45 +250,48 @@ async def gravar_e_converter_acx(segmentos_cap: list[dict], voice: str) -> bytes
                 silencio_base = await obter_frame_silencio_nativo(voice)
             if silencio_base:
                 repeticoes = int(b['segundos'] * 18)
-                buffer_wav.write(silencio_base * max(1, repeticoes))
+                buffer_audio.write(silencio_base * max(1, repeticoes))
         elif b['tipo'] == 'fala':
             communicate = edge_tts.Communicate(
-                b['texto'],
-                voice,
-                rate=b['rate'],
-                pitch=b['pitch'],
-                volume="+0%"
+                b['texto'], voice, rate=b['rate'], 
+                pitch=b['pitch'], volume="+0%"
             )
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
-                    buffer_wav.write(chunk["data"])
+                    buffer_audio.write(chunk["data"])
 
-    raw_audio = buffer_wav.getvalue()
+    raw_audio = buffer_audio.getvalue()
 
-    # Utilização de ficheiros temporários para conversão rigorosa por FFmpeg (Padrão ACX)
     with tempfile.TemporaryDirectory() as tmpdir:
-        in_path = os.path.join(tmpdir, "input.raw")
-        out_path = os.path.join(tmpdir, "output.mp3")
-
-        with open(in_path, "wb") as f:
+        input_path = os.path.join(tmpdir, "input.mp3")
+        output_path = os.path.join(tmpdir, "output.mp3")
+        
+        with open(input_path, "wb") as f:
             f.write(raw_audio)
-
-        # Comando exato sugerido para atingir 192k, 44.1kHz e Estéreo (ACX Compliant)
+        
         cmd = [
-            "ffmpeg", "-y", "-f", "mp3", "-i", in_path,
-            "-b:a", "192k", "-ar", "44100", "-ac", "2",
-            "-codec:a", "libmp3lame", "-q:a", "2", out_path
+            "ffmpeg", "-y",
+            "-i", input_path,
+            "-b:a", "192k",
+            "-ar", "44100",
+            "-ac", "2",
+            "-codec:a", "libmp3lame",
+            output_path
         ]
-
+        
         try:
-            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-            if os.path.exists(out_path):
-                with open(out_path, "rb") as f:
+            subprocess.run(cmd, capture_output=True, check=True)
+            
+            if os.path.exists(output_path):
+                with open(output_path, "rb") as f:
                     return f.read()
-        except Exception:
-            pass
-
-        return raw_audio
+            else:
+                st.error("Ficheiro convertido não encontrado")
+                return raw_audio
+                
+        except subprocess.CalledProcessError as e:
+            st.error(f"Erro FFmpeg: {e.stderr.decode()}")
+            return raw_audio
 
 # --- BARRA LATERAL ---
 with st.sidebar:
@@ -357,7 +360,7 @@ if uploaded_file is not None:
 
         for step, idx in enumerate(indices):
             cap = capitulos[idx]
-            status.info(f"🎙️ A converter {cap['nome_mp3']} para o padrão ACX (192kbps / 44.1kHz Estéreo) [{step + 1}/{len(indices)}]...")
+            status.info(f"🎙️ A converter {cap['nome_mp3']} para o padrão ACX [{step + 1}/{len(indices)}]...")
 
             segs_a_gravar = list(cap['segmentos'])
 
