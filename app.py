@@ -12,7 +12,7 @@ st.set_page_config(page_title="Estúdio Profissional de Audiolivros", page_icon=
 st.title("🎧 Estúdio Profissional de Audiolivros")
 
 # 2. O botão de link da página pode ir logo a seguir ao título ou na barra lateral
-st.page_link("pages/Loja.py", label="Visitar a Loja Oficial (EPUB & Audiolivro)", icon="📚")
+st.page_link("Loja.py", label="Visitar a Loja Oficial (EPUB & Audiolivro)", icon="📚")
 
 st.markdown(
     "Processamento avançado de guiões com **ritmo natural optimizado (-10%)**, "
