@@ -5,14 +5,13 @@ import io
 import re
 import json
 import zipfile
-import unicodedata
 
 st.set_page_config(page_title="Estúdio Profissional de Audiolivros", page_icon="🎧", layout="centered")
 
 st.title("🎧 Estúdio Profissional de Audiolivros")
 st.markdown(
-    "Organização inteligente por **Capítulos Reais**: funde automaticamente os títulos das Partes "
-    "no capítulo seguinte, elimina faixas vazias e mantém a entoação fluida."
+    "Processamento avançado de guiões com **ritmo natural e pausas ajustadas** (sem silêncios excessivos), "
+    "organização limpa por Capítulos e vozes em Português de alta qualidade."
 )
 
 # --- FUNÇÃO PARA LIMPAR NOMES DE FICHEIROS ---
@@ -22,13 +21,13 @@ def limpar_nome_ficheiro(texto: str) -> str:
     texto = re.sub(r'[^\w_]', '', texto)
     return texto.lower()
 
-# --- PARSER CÉNICO POR CAPÍTULOS COM FUSÃO DE PARTES ---
+# --- PARSER CÉNICO COM COMPRESSÃO DE PAUSAS EXCESSIVAS ---
 def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) -> list[dict]:
     linhas = texto_bruto.split('\n')
     capitulos = []
     
     capitulo_atual = None
-    parte_pendente = None  # Guarda "PARTE UM...", etc., para fundir no capítulo logo a seguir
+    parte_pendente = None
 
     rate_atual = "-6%"
     pitch_atual = "-1Hz"
@@ -82,37 +81,34 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
         }
         capitulos.append(capitulo_atual)
 
-        # Se havia uma PARTE (ex: PARTE UM — O COMBUSTÍVEL) antes deste capítulo,
-        # anunciamo-la aqui dentro para não gerar um ficheiro MP3 solto de 20 caracteres!
         if parte_pendente:
             if anunciar_cap:
                 parte_audio = re.sub(r'\s*[—\-]\s*', '. ', parte_pendente).capitalize()
-                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
+                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.0})
                 capitulo_atual['segmentos'].append({
                     'tipo': 'fala',
                     'texto': f"{parte_audio}.",
                     'rate': '-10%',
                     'pitch': '-2Hz'
                 })
-                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 3.0})
+                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
             parte_pendente = None
 
         if anunciar_cap:
-            capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
+            capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.0})
             capitulo_atual['segmentos'].append({
                 'tipo': 'fala',
                 'texto': f"{titulo_limpo_audio}.",
                 'rate': '-8%',
                 'pitch': '-2Hz'
             })
-            capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 2.5})
+            capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
 
     for linha in linhas:
         l = linha.strip()
         if not l:
             continue
 
-        # 1. Créditos Finais
         if re.match(r'^CRÉDITOS DO AUDIOBOOK$', l, re.IGNORECASE):
             descarregar_fala()
             em_creditos_finais = True
@@ -120,7 +116,7 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
 
         if em_creditos_finais:
             if l.lower().startswith("obrigado por ouvires") and capitulo_atual is not None:
-                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 2.5})
+                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
                 capitulo_atual['segmentos'].append({
                     'tipo': 'fala',
                     'texto': l,
@@ -129,55 +125,48 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
                 })
             continue
 
-        # 2. Ignorar separadores visuais (======)
         if re_separador.match(l):
             continue
 
-        # 3. Detetar divisórias de PARTE (Guarda em espera para fundir no Capítulo seguinte)
         if re_parte.match(l):
             descarregar_fala()
             parte_pendente = l
             em_cabecalho_inicial = False
             continue
 
-        # 4. Detetar início de CAPÍTULO, EPÍLOGO, SISTEMA MÍNIMO ou NOTAS FINAIS
         if re_capitulo.match(l):
             iniciar_novo_capitulo(l)
             continue
 
-        # Ignorar ficha técnica inicial caso não exista "CAPÍTULO 0"
         if em_cabecalho_inicial:
             continue
 
-        # 5. Ignorar cabeçalhos internos das secções (2. O CONCEITO, etc.) mas inserir pausa
         if re_seccoes_ocultas.match(l):
             descarregar_fala()
             if capitulo_atual is not None:
-                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 2.0})
+                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.0})
             continue
 
-        # 6. Ignorar marcadores de fim ([FIM DO CAPÍTULO X])
         if re_fim.match(l):
             descarregar_fala()
             if capitulo_atual is not None:
-                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 3.0})
+                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
             continue
 
-        # 7. Ignorar indicações de música ([MÚSICA: ...])
         if re_musica.match(l):
             descarregar_fala()
             continue
 
-        # 8. Pausas explícitas ([P: Xs])
         m_pausa = re_pausa.match(l)
         if m_pausa:
             descarregar_fala()
             if capitulo_atual is not None:
-                seg = float(m_pausa.group(1))
-                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': seg})
+                seg_original = float(m_pausa.group(1))
+                # COMPRESSÃO DE PAUSAS: Limita pausas longas a um máximo natural de 2.5 segundos para não secar o ritmo
+                seg_ajustado = min(seg_original, 2.5)
+                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': seg_ajustado})
             continue
 
-        # 9. Instruções de Tom do Narrador ([NARRADOR — ...])
         m_narrador = re_narrador.match(l)
         if m_narrador:
             descarregar_fala()
@@ -202,7 +191,6 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
                 pitch_atual = "-1Hz"
             continue
 
-        # 10. Limpeza de texto e símbolos especiais
         l_limpa = re.sub(r'\[.*?\]', '', l)
         l_limpa = l_limpa.replace('→', ', ')
         l_limpa = re.sub(r'_{2,}', '...', l_limpa)
@@ -215,12 +203,10 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
         if not l_limpa:
             continue
 
-        # Acumula a linha respeitando a pontuação original para leitura fluida
         buffer_fala.append(l_limpa)
 
     descarregar_fala()
 
-    # Filtrar qualquer capítulo que tenha ficado sem caracteres de fala (como o antigo 00_Abertura)
     capitulos_validos = []
     for cap in capitulos:
         chars_cap = sum(len(s['texto']) for s in cap['segmentos'] if s['tipo'] == 'fala')
@@ -230,14 +216,13 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
             cap['num_pausas'] = sum(1 for s in cap['segmentos'] if s['tipo'] == 'pausa')
             capitulos_validos.append(cap)
 
-    # Numerar sequencialmente de forma limpa: 01, 02, 03...
     for idx, cap in enumerate(capitulos_validos, 1):
         cap['indice'] = idx
         cap['nome_mp3'] = f"{idx:02d}_{cap['slug']}.mp3"
 
     return capitulos_validos
 
-# --- FUNÇÃO DE SILÊNCIO NATIVO ROBUSTA ---
+# --- FUNÇÃO DE SILÊNCIO NATIVO ---
 async def obter_frame_silencio_nativo(voice: str) -> bytes:
     try:
         communicate = edge_tts.Communicate("ponto", voice)
@@ -319,10 +304,10 @@ if uploaded_file is not None:
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Caracteres", f"{total_chars:,}")
     col2.metric("Blocos de Fala", f"{total_falas:,}")
-    col3.metric("Pausas", f"{total_pausas:,}")
+    col3.metric("Pausas Ajustadas", f"{total_pausas:,}")
     col4.metric("Capítulos Limpos", total_caps)
 
-    with st.expander("📋 Capítulos Identificados (Sem Faixas Vazias nem Duplicados)", expanded=True):
+    with st.expander("📋 Capítulos Identificados", expanded=True):
         for c in capitulos:
             total_segs = len(c['segmentos'])
             st.markdown(f"**{c['nome_mp3']}** — {total_segs} segmentos, ~{c['caracteres']:,} caracteres")
@@ -333,7 +318,7 @@ if uploaded_file is not None:
     c_ini = col_i.number_input("Começar no Capítulo", min_value=1, max_value=total_caps, value=1)
     c_fim = col_f.number_input("Terminar no Capítulo", min_value=c_ini, max_value=total_caps, value=total_caps)
 
-    if st.button("🚀 Gerar Audiolivro por Capítulos", type="primary", use_container_width=True):
+    if st.button("🚀 Gerar Audiolivro com Pausas Naturais", type="primary", use_container_width=True):
         st.session_state.arquivos_gerados = []
         indices = list(range(c_ini - 1, c_fim))
 
@@ -347,7 +332,6 @@ if uploaded_file is not None:
 
             segs_a_gravar = list(cap['segmentos'])
 
-            # Se a opção de repetir a última frase do capítulo anterior estiver ativa
             if idx > 0 and fazer_overlap:
                 falas_ant = [s for s in capitulos[idx - 1]['segmentos'] if s['tipo'] == 'fala']
                 if falas_ant:
@@ -360,7 +344,7 @@ if uploaded_file is not None:
                             'rate': ult_bloco['rate'],
                             'pitch': ult_bloco['pitch']
                         })
-                        segs_a_gravar.insert(1, {'tipo': 'pausa', 'segundos': 1.5})
+                        segs_a_gravar.insert(1, {'tipo': 'pausa', 'segundos': 1.0})
 
             audio_mp3 = asyncio.run(gravar_audio_capitulo(segs_a_gravar, voice_id))
             resumo_txt = next((s['texto'] for s in cap['segmentos'] if s['tipo'] == 'fala'), "")[:100]
