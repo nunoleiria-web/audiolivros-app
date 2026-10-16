@@ -11,8 +11,8 @@ st.set_page_config(page_title="Estúdio Profissional de Audiolivros", page_icon=
 
 st.title("🎧 Estúdio Profissional de Audiolivros")
 st.markdown(
-    "Processamento avançado de guiões: analisa o texto, filtra comandos de palco, "
-    "aplica pausas exatas e gera vozes em Português de alta qualidade com controlo total."
+    "Processamento avançado de guiões com **continuidade entre partes** (o ficheiro seguinte começa na última frase do anterior), "
+    "pausas exatas e vozes em Português de alta qualidade."
 )
 
 # --- FUNÇÃO DE ANÁLISE DE GUIÃO (PARSER CÉNICO STANDALONE) ---
@@ -188,10 +188,9 @@ def agrupar_em_partes(segmentos: list[dict], max_chars: int = 8000) -> list[list
         partes.append(parte_atual)
     return partes
 
-# --- FUNÇÃO DE SILÊNCIO NATIVO ROBUSTA (SEM ERROS DE STREAM VAZIO) ---
+# --- FUNÇÃO DE SILÊNCIO NATIVO ROBUSTA ---
 async def obter_frame_silencio_nativo(voice: str) -> bytes:
     try:
-        # Usa um caractere válido e comum para forçar a geração de áudio limpo pelo Edge-TTS
         communicate = edge_tts.Communicate(" ", voice)
         chunks = []
         async for chunk in communicate.stream():
@@ -202,7 +201,6 @@ async def obter_frame_silencio_nativo(voice: str) -> bytes:
             return ultimo[-288:] if len(ultimo) >= 288 else ultimo
     except Exception:
         pass
-    # Frame de fallback genérico caso o stream falhe por latência da rede
     return b'\x00' * 320
 
 async def gravar_parte_audio(blocos_parte: list[dict], voice: str) -> bytes:
@@ -244,6 +242,7 @@ with st.sidebar:
     voice_id = vozes_disponiveis[voz_selecionada]
     
     anunciar_capitulos = st.checkbox("Anunciar títulos de Capítulos e Partes", value=True)
+    fazer_overlap = st.checkbox("Repetir última frase na parte seguinte (Continuidade)", value=True)
     
     st.subheader("📦 Organização de Ficheiros")
     chars_por_parte = st.slider(
@@ -336,7 +335,28 @@ if uploaded_file is not None:
             num_p = idx + 1
             status.info(f"🎙️ A processar Parte {num_p} de {p_fim}...")
             
-            audio_mp3 = asyncio.run(gravar_parte_audio(partes[idx], voice_id))
+            # Preparar blocos da parte atual
+            blocos_a_processar = list(partes[idx])
+            
+            # Se for Parte > 1 e o overlap estiver ativo, prepend a última frase da parte anterior
+            if idx > 0 and fazer_overlap:
+                bloco_anterior_fala = None
+                for b in reversed(partes[idx - 1]):
+                    if b['tipo'] == 'fala':
+                        bloco_anterior_fala = b
+                        break
+                if bloco_anterior_fala:
+                    frases = re.split(r'(?<=[.!?])\s+', bloco_anterior_fala['texto'])
+                    if frases and frases[-1].strip():
+                        ultima_frase = frases[-1].strip()
+                        blocos_a_processar.insert(0, {
+                            'tipo': 'fala',
+                            'texto': ultima_frase,
+                            'rate': bloco_anterior_fala.get('rate', '-6%'),
+                            'pitch': bloco_anterior_fala.get('pitch', '-1Hz')
+                        })
+
+            audio_mp3 = asyncio.run(gravar_parte_audio(blocos_a_processar, voice_id))
             resumo_txt = next((b['texto'] for b in partes[idx] if b['tipo'] == 'fala'), "")[:100]
             nome_arq = f"{nome_base}_Parte_{num_p:02d}.mp3"
             
