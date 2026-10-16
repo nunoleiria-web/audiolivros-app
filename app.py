@@ -10,8 +10,8 @@ st.set_page_config(page_title="Estúdio Profissional de Audiolivros", page_icon=
 
 st.title("🎧 Estúdio Profissional de Audiolivros")
 st.markdown(
-    "Processamento avançado de guiões com **ritmo natural e pausas ajustadas** (sem silêncios excessivos), "
-    "organização limpa por Capítulos e vozes em Português de alta qualidade."
+    "Processamento avançado de guiões com **ritmo natural optimizado (-10%)**, "
+    "detecção robusta de capítulos e pausas calibradas."
 )
 
 # --- FUNÇÃO PARA LIMPAR NOMES DE FICHEIROS ---
@@ -21,7 +21,7 @@ def limpar_nome_ficheiro(texto: str) -> str:
     texto = re.sub(r'[^\w_]', '', texto)
     return texto.lower()
 
-# --- PARSER CÉNICO COM COMPRESSÃO DE PAUSAS EXCESSIVAS ---
+# --- PARSER CÉNICO ROBUSTO POR CAPÍTULOS ---
 def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) -> list[dict]:
     linhas = texto_bruto.split('\n')
     capitulos = []
@@ -29,8 +29,9 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
     capitulo_atual = None
     parte_pendente = None
 
-    rate_atual = "-6%"
-    pitch_atual = "-1Hz"
+    # Ritmo base ajustado para -10% para uma narração mais natural e pausada
+    rate_atual = "-10%"
+    pitch_atual = "-2Hz"
     buffer_fala = []
 
     em_cabecalho_inicial = True
@@ -48,8 +49,10 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
     )
 
     re_parte = re.compile(r'^PARTE\s+[A-ZÀ-Ú0-9]+(?:\s*[—\-:]\s*.+)?$', re.IGNORECASE)
+    
+    # Regex melhorada para apanhar todas as variantes de capítulos, epílogos, notas e sistema mínimo
     re_capitulo = re.compile(
-        r'^(CAPÍTULO\s+\d+[A-Z]?\s*[—\-:].+|EPÍLOGO\s*[—\-:].+|O SISTEMA MÍNIMO|NOTAS FINAIS|FONTES E FUNDAMENTOS)$',
+        r'^(CAPÍTULO\s+\d+[A-Z]?(?:\s*[—\-:].*)?|EPÍLOGO(?:\s*[—\-:].*)?|O SISTEMA MÍNIMO|NOTAS FINAIS|FONTES E FUNDAMENTOS)$',
         re.IGNORECASE
     )
 
@@ -162,7 +165,6 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
             descarregar_fala()
             if capitulo_atual is not None:
                 seg_original = float(m_pausa.group(1))
-                # COMPRESSÃO DE PAUSAS: Limita pausas longas a um máximo natural de 2.5 segundos para não secar o ritmo
                 seg_ajustado = min(seg_original, 2.5)
                 capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': seg_ajustado})
             continue
@@ -175,20 +177,20 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
                 rate_atual = "-12%"
                 pitch_atual = "-3Hz"
             elif "sóbrio" in instrucao_tom or "grave" in instrucao_tom:
-                rate_atual = "-9%"
-                pitch_atual = "-3Hz"
+                rate_atual = "-10%"
+                pitch_atual = "-4Hz"
             elif "íntimo" in instrucao_tom or "próximo" in instrucao_tom:
-                rate_atual = "-7%"
+                rate_atual = "-10%"
                 pitch_atual = "-2Hz"
             elif "informativo" in instrucao_tom or "claro" in instrucao_tom:
-                rate_atual = "-3%"
-                pitch_atual = "+0Hz"
-            elif "prático" in instrucao_tom:
-                rate_atual = "-4%"
-                pitch_atual = "+0Hz"
-            else:
                 rate_atual = "-6%"
                 pitch_atual = "-1Hz"
+            elif "prático" in instrucao_tom:
+                rate_atual = "-8%"
+                pitch_atual = "-1Hz"
+            else:
+                rate_atual = "-10%"
+                pitch_atual = "-2Hz"
             continue
 
         l_limpa = re.sub(r'\[.*?\]', '', l)
@@ -304,8 +306,8 @@ if uploaded_file is not None:
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Caracteres", f"{total_chars:,}")
     col2.metric("Blocos de Fala", f"{total_falas:,}")
-    col3.metric("Pausas Ajustadas", f"{total_pausas:,}")
-    col4.metric("Capítulos Limpos", total_caps)
+    col3.metric("Pausas", f"{total_pausas:,}")
+    col4.metric("Capítulos Totais", total_caps)
 
     with st.expander("📋 Capítulos Identificados", expanded=True):
         for c in capitulos:
@@ -318,7 +320,7 @@ if uploaded_file is not None:
     c_ini = col_i.number_input("Começar no Capítulo", min_value=1, max_value=total_caps, value=1)
     c_fim = col_f.number_input("Terminar no Capítulo", min_value=c_ini, max_value=total_caps, value=total_caps)
 
-    if st.button("🚀 Gerar Audiolivro com Pausas Naturais", type="primary", use_container_width=True):
+    if st.button("🚀 Gerar Audiolivro Profissional", type="primary", use_container_width=True):
         st.session_state.arquivos_gerados = []
         indices = list(range(c_ini - 1, c_fim))
 
