@@ -6,15 +6,17 @@ import re
 import json
 import zipfile
 
-# --- BOTÃO DE ACESSO RÁPIDO À LOJA ---
-st.page_link("pages/2_Loja.py", label="Visitar a Loja Oficial (EPUB & Audiolivro)", icon="📚")
-
+# 1. Configuração da página DEVE ser a primeira instrução Streamlit
 st.set_page_config(page_title="Estúdio Profissional de Audiolivros", page_icon="🎧", layout="centered")
 
 st.title("🎧 Estúdio Profissional de Audiolivros")
+
+# 2. O botão de link da página pode ir logo a seguir ao título ou na barra lateral
+st.page_link("pages/2_Loja.py", label="Visitar a Loja Oficial (EPUB & Audiolivro)", icon="📚")
+
 st.markdown(
     "Processamento avançado de guiões com **ritmo natural optimizado (-10%)**, "
-    "detecção robusta de capítulos e pausas calibradas."
+    "detecção rigorosa de capítulos e geração estável e imediata."
 )
 
 # --- FUNÇÃO PARA LIMPAR NOMES DE FICHEIROS ---
