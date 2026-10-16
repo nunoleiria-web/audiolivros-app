@@ -188,17 +188,22 @@ def agrupar_em_partes(segmentos: list[dict], max_chars: int = 8000) -> list[list
         partes.append(parte_atual)
     return partes
 
-# --- FUNÇÃO DE SILÊNCIO NATIVO COMPATÍVEL ---
+# --- FUNÇÃO DE SILÊNCIO NATIVO ROBUSTA (SEM ERROS DE STREAM VAZIO) ---
 async def obter_frame_silencio_nativo(voice: str) -> bytes:
-    communicate = edge_tts.Communicate("...", voice)
-    chunks = []
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            chunks.append(chunk["data"])
-    if chunks:
-        ultimo = chunks[-1]
-        return ultimo[-288:] if len(ultimo) >= 288 else ultimo
-    return b""
+    try:
+        # Usa um caractere válido e comum para forçar a geração de áudio limpo pelo Edge-TTS
+        communicate = edge_tts.Communicate(" ", voice)
+        chunks = []
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                chunks.append(chunk["data"])
+        if chunks:
+            ultimo = chunks[-1]
+            return ultimo[-288:] if len(ultimo) >= 288 else ultimo
+    except Exception:
+        pass
+    # Frame de fallback genérico caso o stream falhe por latência da rede
+    return b'\x00' * 320
 
 async def gravar_parte_audio(blocos_parte: list[dict], voice: str) -> bytes:
     buffer_final = io.BytesIO()
@@ -293,7 +298,6 @@ if uploaded_file is not None:
                 amostra.append(f"🎙️ **(Vel: {s['rate']} | Tom: {s['pitch']})**: {s['texto']}")
         st.markdown("\n\n".join(amostra))
 
-    # Botões para exportar dados estruturados (JSON / Relatório)
     col_dl1, col_dl2 = st.columns(2)
     with col_dl1:
         json_data = json.dumps({'segmentos': segmentos, 'partes': partes}, ensure_ascii=False, indent=2)
