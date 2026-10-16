@@ -7,47 +7,21 @@ import io
 import re
 import zipfile
 
-# Tentar importar o Kokoro para alta qualidade de IA
-KOKORO_DISPONIVEL = False
-try:
-    from kokoro import KPipeline
-    import soundfile as sf
-    import torch
-    KOKORO_DISPONIVEL = True
-except Exception:
-    KOKORO_DISPONIVEL = False
+st.set_page_config(page_title="Gerador de Audiolivros", page_icon="🎧", layout="centered")
 
-st.set_page_config(page_title="Gerador de Audiolivros com IA", page_icon="🎧", layout="centered")
-
-st.title("🎧 Conversor de Livros para Audiolivro (IA Avançada)")
-st.markdown("Converte o teu livro em partes, limpa automaticamente instruções de guião e separadores, e usa **vozes em Português**.")
+st.title("🎧 Conversor de Livros para Audiolivro")
+st.markdown("Converte o teu livro em partes, limpa automaticamente instruções de guião e separadores, e descarrega o áudio **à medida que vai sendo gerado**.")
 
 # --- BARRA LATERAL: CONFIGURAÇÕES ---
 with st.sidebar:
-    st.header("⚙️ Configurações de Voz e IA")
+    st.header("⚙️ Configurações de Voz")
     
-    motores_disponiveis = ["Edge-TTS (Rápido e Estável)"]
-    if KOKORO_DISPONIVEL:
-        motores_disponiveis.insert(0, "Kokoro-82M (IA Hiper-Realista)")
-        
-    motor_escolhido = st.selectbox("Motor de Voz", motores_disponiveis)
-    
-    # Definição correta das vozes consoante o motor escolhido
-    if "Kokoro" in motor_escolhido:
-        vozes_disponiveis = {
-            "🇧🇷 Dora (IA / Feminina - PT-BR)": "pf_dora",
-            "🇧🇷 Alex (IA / Masculino - PT-BR)": "pm_alex",
-            "🇧🇷 Santa (IA / Masculino - PT-BR)": "pm_santa",
-            "🇺🇸 Heart (IA Premium / Feminina - Alternativa)": "af_heart"
-        }
-        lang_code = 'p'  # Código para português no pipeline do Kokoro
-    else:
-        vozes_disponiveis = {
-            "🇵🇹 Raquel (PT - Natural / Feminina)": "pt-PT-RaquelNeural",
-            "🇵🇹 Duarte (PT - Natural / Masculina)": "pt-PT-DuarteNeural",
-            "🇧🇷 Francisca (BR - Natural / Feminina)": "pt-BR-FranciscaNeural",
-            "🇧🇷 Antonio (BR - Natural / Masculino)": "pt-BR-AntonioNeural"
-        }
+    vozes_disponiveis = {
+        "🇵🇹 Raquel (PT - Natural / Feminina)": "pt-PT-RaquelNeural",
+        "🇵🇹 Duarte (PT - Natural / Masculina)": "pt-PT-DuarteNeural",
+        "🇧🇷 Francisca (BR - Natural / Feminina)": "pt-BR-FranciscaNeural",
+        "🇧🇷 Antonio (BR - Natural / Masculino)": "pt-BR-AntonioNeural"
+    }
     
     voz_selecionada = st.selectbox("Escolhe a Voz", list(vozes_disponiveis.keys()))
     voice_id = vozes_disponiveis[voz_selecionada]
@@ -179,32 +153,15 @@ def dividir_partes_base(frases: list[str], max_chars_parte: int) -> list[list[st
         partes.append(parte_atual)
     return partes
 
-# --- FUNÇÃO DE SÍNTESE DE ÁUDIO (HÍBRIDA) ---
-async def gerar_audio_texto_edge(texto: str, voice: str) -> bytes:
+async def gerar_audio_texto(texto: str, voice: str) -> bytes:
+    if not texto.strip():
+        return b""
     communicate = edge_tts.Communicate(texto, voice)
     mp3_buffer = io.BytesIO()
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
             mp3_buffer.write(chunk["data"])
     return mp3_buffer.getvalue()
-
-def gerar_audio_kokoro(texto: str, voice: str) -> bytes:
-    try:
-        pipeline = KPipeline(lang_code=lang_code)
-        generator = pipeline(texto, voice=voice, speed=1.0)
-        audio_chunks = []
-        for _, _, audio in generator:
-            audio_chunks.append(audio)
-        
-        if audio_chunks:
-            import numpy as np
-            combined_audio = np.concatenate(audio_chunks)
-            wav_buffer = io.BytesIO()
-            sf.write(wav_buffer, combined_audio, 24000, format='WAV')
-            return wav_buffer.getvalue()
-    except Exception:
-        pass
-    return b""
 
 # --- INICIALIZAR MEMÓRIA DA SESSÃO ---
 if "arquivos_partes" not in st.session_state:
@@ -250,7 +207,7 @@ if uploaded_file is not None:
         parte_inicial = col_inicio.number_input("Começar na Parte", min_value=1, max_value=total_partes, value=1)
         parte_final = col_fim.number_input("Terminar na Parte", min_value=parte_inicial, max_value=total_partes, value=total_partes)
         
-        if st.button(f"🚀 Gerar Áudios com {motor_escolhido.split()[0]}", type="primary", use_container_width=True):
+        if st.button("🚀 Gerar Áudios", type="primary", use_container_width=True):
             st.session_state.arquivos_partes = []
             st.session_state.audio_completo = None
             
@@ -266,8 +223,6 @@ if uploaded_file is not None:
             status_container = st.empty()
             barra_progresso = st.progress(0)
             
-            usar_kokoro = "Kokoro" in motor_escolhido and KOKORO_DISPONIVEL
-            
             for step, idx_real in enumerate(indices_selecionados):
                 num_parte_humana = idx_real + 1
                 status_container.info(f"🔄 A gerar Parte {num_parte_humana} de {parte_final}...")
@@ -276,12 +231,7 @@ if uploaded_file is not None:
                 frases_atuais = partes_limpas[idx_real]
                 texto_limpo_bloco = " ".join(frases_atuais)
                 
-                if usar_kokoro:
-                    audio_limpo_bytes = gerar_audio_kokoro(texto_limpo_bloco, voice_id)
-                    ext_formato = "wav"
-                else:
-                    audio_limpo_bytes = asyncio.run(gerar_audio_texto_edge(texto_limpo_bloco, voice_id))
-                    ext_formato = "mp3"
+                audio_limpo_bytes = asyncio.run(gerar_audio_texto(texto_limpo_bloco, voice_id))
                 
                 if gerar_completo and audio_limpo_bytes:
                     buffer_completo.write(audio_limpo_bytes)
@@ -290,18 +240,15 @@ if uploaded_file is not None:
                     if idx_real > 0 and frases_repetidas > 0:
                         frases_overlap = partes_limpas[idx_real - 1][-frases_repetidas:]
                         texto_overlap = " ".join(frases_overlap)
-                        if usar_kokoro:
-                            audio_overlap_bytes = gerar_audio_kokoro(texto_overlap, voice_id)
-                        else:
-                            audio_overlap_bytes = asyncio.run(gerar_audio_texto_edge(texto_overlap, voice_id))
+                        audio_overlap_bytes = asyncio.run(gerar_audio_texto(texto_overlap, voice_id))
                         audio_final_parte = audio_overlap_bytes + audio_limpo_bytes
                         primeira_frase_mostrar = frases_overlap[0]
                     else:
                         audio_final_parte = audio_limpo_bytes
                         primeira_frase_mostrar = frases_atuais[0]
                         
-                    nome_ficheiro_audio = f"{nome_base}_Parte_{num_parte_humana:02d}.{ext_formato}"
-                    lista_partes_temp.append((nome_ficheiro_audio, audio_final_parte, primeira_frase_mostrar, ext_formato))
+                    nome_ficheiro_mp3 = f"{nome_base}_Parte_{num_parte_humana:02d}.mp3"
+                    lista_partes_temp.append((nome_ficheiro_mp3, audio_final_parte, primeira_frase_mostrar))
             
             status_container.empty()
             barra_progresso.empty()
@@ -309,8 +256,8 @@ if uploaded_file is not None:
             if gerar_partes:
                 st.session_state.arquivos_partes = lista_partes_temp
             if gerar_completo:
-                nome_completo = f"{nome_base}_Audiolivro_Completo.{ext_formato}"
-                st.session_state.audio_completo = (nome_completo, buffer_completo.getvalue(), ext_formato)
+                nome_completo = f"{nome_base}_Audiolivro_Completo.mp3"
+                st.session_state.audio_completo = (nome_completo, buffer_completo.getvalue())
                 
             st.success("🎉 Processamento concluído com sucesso! Podes ouvir e descarregar abaixo.")
 
@@ -320,16 +267,15 @@ if st.session_state.audio_completo or st.session_state.arquivos_partes:
     st.subheader("📥 Áudios Prontos para Ouvir e Descarregar")
     
     if st.session_state.audio_completo:
-        nome_comp, bytes_comp, ext_comp = st.session_state.audio_completo
-        mime_tipo = "audio/wav" if ext_comp == "wav" else "audio/mp3"
+        nome_comp, bytes_comp = st.session_state.audio_completo
         with st.container(border=True):
-            st.markdown(f"### 🏆 Áudio Único ({ext_comp.upper()})")
-            st.audio(bytes_comp, format=mime_tipo)
+            st.markdown("### 🏆 Áudio Único (Livro Completo)")
+            st.audio(bytes_comp, format="audio/mp3")
             st.download_button(
                 label=f"📥 Descarregar Áudio Completo ({nome_comp})",
                 data=bytes_comp,
                 file_name=nome_comp,
-                mime=mime_tipo,
+                mime="audio/mp3",
                 type="primary",
                 use_container_width=True,
                 key="dl_completo_unico"
@@ -339,27 +285,26 @@ if st.session_state.audio_completo or st.session_state.arquivos_partes:
         st.markdown("### 📚 Áudios Divididos por Partes")
         arquivos_para_zip = []
         
-        for idx, (nome_arq, audio_bytes, primeira_frase, ext_arq) in enumerate(st.session_state.arquivos_partes):
-            arquivos_para_zip.append((nome_arq, audio_bytes))
-            mime_tipo = "audio/wav" if ext_arq == "wav" else "audio/mp3"
+        for idx, (nome_mp3, audio_bytes, primeira_frase) in enumerate(st.session_state.arquivos_partes):
+            arquivos_para_zip.append((nome_mp3, audio_bytes))
             with st.container(border=True):
-                st.markdown(f"**🎵 {nome_arq}**")
+                st.markdown(f"**🎵 {nome_mp3}**")
                 st.caption(f"Início: \"{primeira_frase[:100]}...\"")
-                st.audio(audio_bytes, format=mime_tipo)
+                st.audio(audio_bytes, format="audio/mp3")
                 st.download_button(
-                    label=f"📥 Descarregar {nome_arq}",
+                    label=f"📥 Descarregar {nome_mp3}",
                     data=audio_bytes,
-                    file_name=nome_arq,
-                    mime=mime_tipo,
+                    file_name=nome_mp3,
+                    mime="audio/mp3",
                     key=f"dl_parte_{idx}"
                 )
                 
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for nome_arq, dados_arq in arquivos_para_zip:
-                zip_file.writestr(nome_arq, dados_arq)
+            for nome_mp3, dados_mp3 in arquivos_para_zip:
+                zip_file.writestr(nome_mp3, dados_mp3)
             if st.session_state.audio_completo:
-                nome_comp, bytes_comp, _ = st.session_state.audio_completo
+                nome_comp, bytes_comp = st.session_state.audio_completo
                 zip_file.writestr(nome_comp, bytes_comp)
                 
         st.download_button(
