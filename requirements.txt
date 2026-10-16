@@ -1,0 +1,5 @@
+streamlit
+elevenlabs
+pymupdf
+ebooklib
+beautifulsoup4
