@@ -10,7 +10,7 @@ import zipfile
 st.set_page_config(page_title="Gerador de Audiolivros Gratuito", page_icon="🎧", layout="centered")
 
 st.title("🎧 Conversor de Livros para Audiolivro (100% Gratuito)")
-st.markdown("Converte o teu livro em partes e descarrega o áudio **à medida que vai sendo gerado**.")
+st.markdown("Converte o teu livro em partes, limpa automaticamente instruções de guião/cenas, e descarrega o áudio **à medida que vai sendo gerado**.")
 
 # --- BARRA LATERAL: CONFIGURAÇÕES ---
 with st.sidebar:
@@ -54,6 +54,33 @@ with st.sidebar:
         help="Garante a continuidade entre as partes individuais."
     )
 
+# --- FUNÇÃO DE LIMPEZA DE GUIÕES E INSTRUÇÕES ---
+def limpar_instrucoes_guiom(texto: str) -> str:
+    """
+    Remove marcações de guião de audiolivro (músicas, pausas, tom do narrador,
+    cabeçalhos estruturais) para que a voz sintetizada leia apenas o texto corrido.
+    """
+    # Remove blocos entre parênteses rectos do tipo [MÚSICA:...], [NARRADOR:...], [P: 3s], etc.
+    texto_limpo = re.sub(r'\[.*?\]', '', texto)
+    
+    # Remove linhas que sejam cabeçalhos de capítulos ou secções do guião (ex: CAPÍTULO 1, A CIÊNCIA, A FERRAMENTA, etc.)
+    linhas = texto_limpo.split('\n')
+    linhas_filtradas = []
+    
+    padroes_ignorar = re.compile(
+        r'^(CAPÍTULO\s+\d+|PARTE\s+[A-ZÀ-Ú]+|O CONCEITO|A CIÊNCIA|A FERRAMENTA|REFLEXÃO|A PONTE|FIM DO CAPÍTULO|DURAÇÃO ESTIMADA|FORMATO|MÚSICA|PAUSAS|ESTRUTURA POR CAPÍTULO|TOM GERAL|=+)',
+        re.IGNORECASE
+    )
+    
+    for linha in linhas:
+        linha_strip = linha.strip()
+        # Ignora linhas de cabeçalho específicas de guiões ou linhas compostas apenas por símbolos de igualdade
+        if padroes_ignorar.match(linha_strip) or re.match(r'^=+$', linha_strip):
+            continue
+        linhas_filtradas.append(linha)
+        
+    return "\n".join(linhas_filtradas)
+
 # --- FUNÇÃO DE EXTRAÇÃO UNIVERSAL BLINDADA ---
 def extrair_documento_universal(file_bytes: bytes, extensao: str) -> str:
     try:
@@ -66,7 +93,7 @@ def extrair_documento_universal(file_bytes: bytes, extensao: str) -> str:
         doc.close()
         resultado = " ".join(texto).strip()
         if resultado:
-            return resultado
+            return limpar_instrucoes_guiom(resultado)
     except Exception:
         pass
 
@@ -80,7 +107,7 @@ def extrair_documento_universal(file_bytes: bytes, extensao: str) -> str:
         doc.close()
         resultado = " ".join(texto).strip()
         if resultado:
-            return resultado
+            return limpar_instrucoes_guiom(resultado)
     except Exception:
         pass
 
@@ -100,11 +127,12 @@ def extrair_documento_universal(file_bytes: bytes, extensao: str) -> str:
                         textos_html.append(t)
             resultado = " ".join(textos_html).strip()
             if resultado:
-                return resultado
+                return limpar_instrucoes_guiom(resultado)
     except Exception:
         pass
 
-    return file_bytes.decode("utf-8", errors="ignore").strip()
+    texto_bruto = file_bytes.decode("utf-8", errors="ignore").strip()
+    return limpar_instrucoes_guiom(texto_bruto)
 
 def separar_em_frases(texto: str) -> list[str]:
     texto_limpo = re.sub(r'\s+', ' ', texto).strip()
@@ -148,7 +176,7 @@ if "livro_nome" not in st.session_state:
     st.session_state.livro_nome = ""
 
 # --- INTERFACE PRINCIPAL ---
-uploaded_file = st.file_uploader("Escolhe o ficheiro do livro", type=["pdf", "epub", "txt"])
+uploaded_file = st.file_uploader("Escolhe o ficheiro do livro ou guião", type=["pdf", "epub", "txt"])
 
 if uploaded_file is not None:
     file_bytes = uploaded_file.read()
@@ -160,7 +188,7 @@ if uploaded_file is not None:
         st.session_state.arquivos_partes = []
         st.session_state.audio_completo = None
 
-    with st.spinner("A analisar o livro..."):
+    with st.spinner("A analisar e a limpar instruções do guião..."):
         texto_extraido = extrair_documento_universal(file_bytes, extensao)
         todas_as_frases = separar_em_frases(texto_extraido)
         partes_limpas = dividir_partes_base(todas_as_frases, chars_por_parte)
@@ -174,6 +202,9 @@ if uploaded_file is not None:
         col1.metric("Total de Caracteres", f"{len(texto_extraido):,}")
         col2.metric("Total de Frases", f"{len(todas_as_frases):,}")
         col3.metric("Partes Calculadas", total_partes)
+        
+        with st.expander("🔍 Pré-visualizar Texto Limpo (Sem Instruções de Guião)"):
+            st.write(texto_extraido[:1000] + "...")
         
         st.subheader("🎯 Intervalo a Processar")
         col_inicio, col_fim = st.columns(2)
@@ -193,7 +224,6 @@ if uploaded_file is not None:
             lista_partes_temp = []
             buffer_completo = io.BytesIO()
             
-            # Caixa de estado de progresso interativo
             status_container = st.empty()
             barra_progresso = st.progress(0)
             
@@ -205,7 +235,6 @@ if uploaded_file is not None:
                 frases_atuais = partes_limpas[idx_real]
                 texto_limpo_bloco = " ".join(frases_atuais)
                 
-                # Gera o áudio da parte atual
                 audio_limpo_bytes = asyncio.run(gerar_audio_texto(texto_limpo_bloco, voice_id))
                 
                 if gerar_completo:
