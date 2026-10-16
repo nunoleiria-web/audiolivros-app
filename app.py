@@ -12,7 +12,7 @@ import zipfile
 st.set_page_config(page_title="Gerador de Audiolivros Gratuito", page_icon="🎧", layout="centered")
 
 st.title("🎧 Conversor de Livros para Audiolivro (100% Gratuito)")
-st.markdown("Converte o teu livro completo em áudio usando as vozes neurais gratuitas da Microsoft via **Edge-TTS**.")
+st.markdown("Converte o teu livro em **várias partes**, num **áudio único completo**, ou **ambos** de uma só vez.")
 
 # --- BARRA LATERAL: CONFIGURAÇÕES ---
 with st.sidebar:
@@ -28,22 +28,32 @@ with st.sidebar:
     voz_selecionada = st.selectbox("Escolhe a Voz", list(vozes_disponiveis.keys()))
     voice_id = vozes_disponiveis[voz_selecionada]
     
-    st.subheader("Tamanho de cada Áudio")
+    st.subheader("📦 Modo de Geração")
+    modo_geracao = st.radio(
+        "Como queres gerar o audiolivro?",
+        [
+            "Vários Áudios (Por Partes)",
+            "Áudio Único (Livro Completo)",
+            "Ambos (Partes + Áudio Completo)"
+        ]
+    )
+    
+    st.subheader("Tamanho de cada Parte")
     chars_por_parte = st.slider(
-        "Caracteres por Parte de Áudio",
+        "Caracteres por Parte",
         min_value=3000,
         max_value=25000,
         value=10000,
         step=1000,
-        help="10.000 caracteres equivalem a cerca de 8 a 10 minutos de áudio por ficheiro."
+        help="Define o tamanho das partes (e os blocos de processamento)."
     )
     
     frases_repetidas = st.number_input(
-        "Frases a repetir do áudio anterior",
-        min_value=1,
+        "Frases a repetir no início de cada Parte",
+        min_value=0,
         max_value=3,
         value=1,
-        help="Quantas frases finais do áudio anterior devem ser repetidas no início do próximo áudio."
+        help="Aplica-se apenas aos ficheiros divididos por partes. O áudio completo nunca repete frases a meio."
     )
 
 # --- FUNÇÕES DE EXTRAÇÃO E DIVISÃO ---
@@ -74,7 +84,8 @@ def separar_em_frases(texto: str) -> list[str]:
     frases = re.split(r'(?<=[.!?])\s+', texto_limpo)
     return [f.strip() for f in frases if f.strip()]
 
-def criar_partes_com_repeticao(frases: list[str], max_chars_parte: int, num_overlap: int) -> list[list[str]]:
+def dividir_partes_base(frases: list[str], max_chars_parte: int) -> list[list[str]]:
+    """Divide o livro em partes limpas (sem repetição)."""
     partes = []
     parte_atual = []
     tamanho_atual = 0
@@ -85,16 +96,16 @@ def criar_partes_com_repeticao(frases: list[str], max_chars_parte: int, num_over
             tamanho_atual += len(frase) + 1
         else:
             partes.append(parte_atual)
-            frases_anteriores = parte_atual[-num_overlap:] if num_overlap > 0 else []
-            parte_atual = list(frases_anteriores) + [frase]
-            tamanho_atual = sum(len(f) + 1 for f in parte_atual)
+            parte_atual = [frase]
+            tamanho_atual = len(frase) + 1
             
     if parte_atual:
         partes.append(parte_atual)
-        
     return partes
 
 async def gerar_audio_texto(texto: str, voice: str) -> bytes:
+    if not texto.strip():
+        return b""
     communicate = edge_tts.Communicate(texto, voice)
     mp3_buffer = io.BytesIO()
     async for chunk in communicate.stream():
@@ -103,8 +114,10 @@ async def gerar_audio_texto(texto: str, voice: str) -> bytes:
     return mp3_buffer.getvalue()
 
 # --- INICIALIZAR MEMÓRIA DA SESSÃO ---
-if "arquivos_gerados" not in st.session_state:
-    st.session_state.arquivos_gerados = []
+if "arquivos_partes" not in st.session_state:
+    st.session_state.arquivos_partes = []
+if "audio_completo" not in st.session_state:
+    st.session_state.audio_completo = None
 if "livro_nome" not in st.session_state:
     st.session_state.livro_nome = ""
 
@@ -116,12 +129,12 @@ if uploaded_file is not None:
     extensao = uploaded_file.name.split(".")[-1].lower()
     nome_base = uploaded_file.name.rsplit(".", 1)[0]
     
-    # Se carregou um livro novo, limpa os áudios antigos da sessão
     if st.session_state.livro_nome != uploaded_file.name:
         st.session_state.livro_nome = uploaded_file.name
-        st.session_state.arquivos_gerados = []
+        st.session_state.arquivos_partes = []
+        st.session_state.audio_completo = None
 
-    with st.spinner("A analisar o livro e preparar as partes..."):
+    with st.spinner("A analisar o livro e preparar os blocos..."):
         if extensao == "pdf":
             texto_extraido = extrair_pdf(file_bytes)
         elif extensao == "epub":
@@ -130,77 +143,131 @@ if uploaded_file is not None:
             texto_extraido = file_bytes.decode("utf-8", errors="ignore")
             
         todas_as_frases = separar_em_frases(texto_extraido)
-        partes_do_livro = criar_partes_com_repeticao(todas_as_frases, chars_por_parte, frases_repetidas)
+        partes_limpas = dividir_partes_base(todas_as_frases, chars_por_parte)
         
-    total_partes = len(partes_do_livro)
+    total_partes = len(partes_limpas)
     
     col1, col2, col3 = st.columns(3)
     col1.metric("Total de Caracteres", f"{len(texto_extraido):,}")
     col2.metric("Total de Frases", f"{len(todas_as_frases):,}")
-    col3.metric("Partes de Áudio", total_partes)
+    col3.metric("Partes Calculadas", total_partes)
     
-    st.subheader("🎯 Escolhe as Partes a Gerar")
+    st.subheader("🎯 Intervalo a Processar")
     col_inicio, col_fim = st.columns(2)
     parte_inicial = col_inicio.number_input("Começar na Parte", min_value=1, max_value=total_partes, value=1)
     parte_final = col_fim.number_input("Terminar na Parte", min_value=parte_inicial, max_value=total_partes, value=total_partes)
     
-    if st.button(f"🚀 Gerar Áudios Gratuitos (Parte {parte_inicial} até {parte_final})", type="primary", use_container_width=True):
-        st.session_state.arquivos_gerados = []  # Limpa lista anterior
-        progresso_geral = st.progress(0, text="A iniciar conversão gratuita...")
-        partes_selecionadas = partes_do_livro[parte_inicial - 1 : parte_final]
-        total_selecionadas = len(partes_selecionadas)
+    if st.button(f"🚀 Gerar ({modo_geracao})", type="primary", use_container_width=True):
+        st.session_state.arquivos_partes = []
+        st.session_state.audio_completo = None
         
-        lista_temporaria = []
-        for idx_p, frases_parte in enumerate(partes_selecionadas):
-            num_parte_real = parte_inicial + idx_p
+        progresso_geral = st.progress(0, text="A iniciar síntese de voz...")
+        indices_selecionados = list(range(parte_inicial - 1, parte_final))
+        total_selecionadas = len(indices_selecionados)
+        
+        gerar_partes = modo_geracao in ["Vários Áudios (Por Partes)", "Ambos (Partes + Áudio Completo)"]
+        gerar_completo = modo_geracao in ["Áudio Único (Livro Completo)", "Ambos (Partes + Áudio Completo)"]
+        
+        lista_partes_temp = []
+        buffer_completo = io.BytesIO()
+        
+        for step, idx_real in enumerate(indices_selecionados):
+            num_parte_humana = idx_real + 1
             progresso_geral.progress(
-                idx_p / total_selecionadas,
-                text=f"A gerar Parte {num_parte_real} de {parte_final}..."
+                step / total_selecionadas,
+                text=f"A processar bloco {num_parte_humana} de {parte_final}..."
             )
             
-            texto_bloco = " ".join(frases_parte)
-            audio_bytes = asyncio.run(gerar_audio_texto(texto_bloco, voice_id))
+            frases_atuais = partes_limpas[idx_real]
+            texto_limpo_bloco = " ".join(frases_atuais)
             
-            nome_ficheiro_mp3 = f"{nome_base}_Parte_{num_parte_real:02d}.mp3"
-            lista_temporaria.append((nome_ficheiro_mp3, audio_bytes, frases_parte[0]))
+            # 1. Gerar o áudio base da parte (sem repetição)
+            audio_limpo_bytes = asyncio.run(gerar_audio_texto(texto_limpo_bloco, voice_id))
             
-        st.session_state.arquivos_gerados = lista_temporaria
-        progresso_geral.progress(1.0, text="✅ Geração concluída!")
-        st.success("🎉 Todos os áudios foram gerados e guardados em segurança na sessão!")
+            # Se precisarmos do áudio completo, junta apenas o áudio limpo (sem repetições)
+            if gerar_completo:
+                buffer_completo.write(audio_limpo_bytes)
+                
+            # Se precisarmos das partes individuais, adiciona o áudio das frases repetidas da parte anterior
+            if gerar_partes:
+                if idx_real > 0 and frases_repetidas > 0:
+                    frases_overlap = partes_limpas[idx_real - 1][-frases_repetidas:]
+                    texto_overlap = " ".join(frases_overlap)
+                    audio_overlap_bytes = asyncio.run(gerar_audio_texto(texto_overlap, voice_id))
+                    audio_final_parte = audio_overlap_bytes + audio_limpo_bytes
+                    primeira_frase_mostrar = frases_overlap[0]
+                else:
+                    audio_final_parte = audio_limpo_bytes
+                    primeira_frase_mostrar = frases_atuais[0]
+                    
+                nome_ficheiro_mp3 = f"{nome_base}_Parte_{num_parte_humana:02d}.mp3"
+                lista_partes_temp.append((nome_ficheiro_mp3, audio_final_parte, primeira_frase_mostrar))
+                
+        if gerar_partes:
+            st.session_state.arquivos_partes = lista_partes_temp
+        if gerar_completo:
+            nome_completo = f"{nome_base}_Audiolivro_Completo.mp3"
+            st.session_state.audio_completo = (nome_completo, buffer_completo.getvalue())
+            
+        progresso_geral.progress(1.0, text="✅ Processamento concluído!")
+        st.success("🎉 Os teus áudios foram gerados e guardados na sessão!")
 
-# --- MOSTRAR OS ÁUDIOS GUARDADOS NA SESSÃO (Não desaparecem ao descarregar) ---
-if st.session_state.arquivos_gerados:
+# --- MOSTRAR RESULTADOS GUARDADOS NA SESSÃO ---
+if st.session_state.audio_completo or st.session_state.arquivos_partes:
     st.markdown("---")
-    st.subheader("📥 Os Teus Áudios Prontos para Ouvir e Descarregar")
+    st.subheader("📥 Os Teus Áudios Prontos")
     
-    arquivos_para_zip = []
-    for idx, (nome_mp3, audio_bytes, primeira_frase) in enumerate(st.session_state.arquivos_gerados):
-        arquivos_para_zip.append((nome_mp3, audio_bytes))
+    # 1. Secção do Áudio Único Completo
+    if st.session_state.audio_completo:
+        nome_comp, bytes_comp = st.session_state.audio_completo
         with st.container(border=True):
-            st.markdown(f"### 🎵 {nome_mp3}")
-            st.caption(f"Começa com: \"{primeira_frase[:120]}...\"")
-            st.audio(audio_bytes, format="audio/mp3")
+            st.markdown("### 🏆 Áudio Único (Livro Completo)")
+            st.caption("Leitura contínua sem repetição de frases entre blocos.")
+            st.audio(bytes_comp, format="audio/mp3")
             st.download_button(
-                label=f"📥 Descarregar {nome_mp3}",
-                data=audio_bytes,
-                file_name=nome_mp3,
+                label=f"📥 Descarregar Áudio Completo ({nome_comp})",
+                data=bytes_comp,
+                file_name=nome_comp,
                 mime="audio/mp3",
-                key=f"dl_{idx}_{nome_mp3}"
+                type="primary",
+                use_container_width=True,
+                key="dl_completo_unico"
             )
-            
-    # Botão ZIP geral
-    if len(arquivos_para_zip) > 1:
+
+    # 2. Secção dos Vários Áudios (Por Partes)
+    if st.session_state.arquivos_partes:
+        st.markdown("### 📚 Áudios Divididos por Partes")
+        arquivos_para_zip = []
+        
+        for idx, (nome_mp3, audio_bytes, primeira_frase) in enumerate(st.session_state.arquivos_partes):
+            arquivos_para_zip.append((nome_mp3, audio_bytes))
+            with st.container(border=True):
+                st.markdown(f"**🎵 {nome_mp3}**")
+                st.caption(f"Começa com: \"{primeira_frase[:120]}...\"")
+                st.audio(audio_bytes, format="audio/mp3")
+                st.download_button(
+                    label=f"📥 Descarregar {nome_mp3}",
+                    data=audio_bytes,
+                    file_name=nome_mp3,
+                    mime="audio/mp3",
+                    key=f"dl_parte_{idx}"
+                )
+                
+        # Botão para descarregar tudo num único ZIP (incluindo o completo se tiver escolhido 'Ambos')
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             for nome_mp3, dados_mp3 in arquivos_para_zip:
                 zip_file.writestr(nome_mp3, dados_mp3)
+            if st.session_state.audio_completo:
+                nome_comp, bytes_comp = st.session_state.audio_completo
+                zip_file.writestr(nome_comp, bytes_comp)
                 
-        st.markdown("---")
         st.download_button(
-            label="📦 Descarregar TODOS os Áudios num Ficheiro ZIP",
+            label="📦 Descarregar Tudo num Ficheiro ZIP",
             data=zip_buffer.getvalue(),
-            file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Audiolivro_Completo.zip",
+            file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Pacote_Audiolivro.zip",
             mime="application/zip",
             type="primary",
-            use_container_width=True
+            use_container_width=True,
+            key="dl_zip_total"
         )
