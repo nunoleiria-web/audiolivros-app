@@ -7,163 +7,288 @@ import io
 import re
 import zipfile
 
-st.set_page_config(page_title="Gerador de Audiolivros", page_icon="🎧", layout="centered")
+st.set_page_config(page_title="Estúdio de Audiolivros IA", page_icon="🎧", layout="centered")
 
-st.title("🎧 Conversor de Livros para Audiolivro")
-st.markdown("Converte o teu livro em partes, limpa automaticamente instruções de guião e separadores, e descarrega o áudio **à medida que vai sendo gerado**.")
+st.title("🎧 Estúdio Inteligente de Audiolivros")
+st.markdown(
+    "Interpretação automática de guiões: **ajusta o tom do narrador**, **injeta as pausas em segundos (`[P: Xs]`)** "
+    "e **limpa comandos técnicos**, disponibilizando cada parte em tempo real."
+)
+
+# ---FRAME DE SILÊNCIO MP3 NATIVO (128kbps, 44.1kHz, ~26.12ms por frame) ---
+# Permite injetar pausas exatas de [P: Xs] sem precisar de FFmpeg instalado no servidor
+MP3_SILENCE_FRAME = bytes([
+    0xFF, 0xFB, 0x90, 0x64, 0x00, 0x0F, 0xF0, 0x00, 0x00, 0x69, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00,
+    0x0D, 0x20, 0x00, 0x00, 0x01, 0x00, 0x00, 0x01, 0xA4, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x34,
+    0x80, 0x00, 0x00, 0x04, 0x00
+]) + b'\x00' * 380
+
+def gerar_silencio_mp3(segundos: float) -> bytes:
+    num_frames = int((segundos * 1000) / 26.122)
+    return MP3_SILENCE_FRAME * max(1, num_frames)
 
 # --- BARRA LATERAL: CONFIGURAÇÕES ---
 with st.sidebar:
-    st.header("⚙️ Configurações de Voz")
+    st.header("⚙️ Direção de Voz e Estúdio")
     
     vozes_disponiveis = {
-        "🇵🇹 Raquel (PT - Natural / Feminina)": "pt-PT-RaquelNeural",
-        "🇵🇹 Duarte (PT - Natural / Masculina)": "pt-PT-DuarteNeural",
-        "🇧🇷 Francisca (BR - Natural / Feminina)": "pt-BR-FranciscaNeural",
-        "🇧🇷 Antonio (BR - Natural / Masculino)": "pt-BR-AntonioNeural"
+        "🇵🇹 Duarte (PT - Masculina / Ideal para o Marco)": "pt-PT-DuarteNeural",
+        "🇵🇹 Raquel (PT - Feminina / Natural)": "pt-PT-RaquelNeural",
+        "🇧🇷 Antonio (BR - Masculina / Profunda)": "pt-BR-AntonioNeural",
+        "🇧🇷 Francisca (BR - Feminina / Suave)": "pt-BR-FranciscaNeural"
     }
     
-    voz_selecionada = st.selectbox("Escolhe a Voz", list(vozes_disponiveis.keys()))
+    voz_selecionada = st.selectbox("Escolhe o Narrador", list(vozes_disponiveis.keys()))
     voice_id = vozes_disponiveis[voz_selecionada]
     
-    st.subheader("📦 Modo de Geração")
+    st.subheader("🎭 Interpretação do Guião")
+    interpretar_pausas = st.checkbox("Respeitar pausas [P: Xs] com silêncio real", value=True)
+    modular_tom = st.checkbox("Adaptar velocidade/tom às notas [NARRADOR]", value=True)
+    ler_titulos_cap = st.checkbox("Anunciar títulos dos Capítulos e Partes", value=True)
+    
+    st.subheader("📦 Divisão do Audiolivro")
     modo_geracao = st.radio(
-        "Como queres gerar o audiolivro?",
+        "Formato de saída:",
         [
             "Vários Áudios (Por Partes)",
-            "Áudio Único (Livro Completo)",
-            "Ambos (Partes + Áudio Completo)"
+            "Ambos (Partes + Áudio Completo)",
+            "Áudio Único (Livro Completo)"
         ]
     )
     
-    st.subheader("Tamanho de cada Parte")
     chars_por_parte = st.slider(
-        "Caracteres por Parte",
+        "Caracteres aproximados por Parte",
         min_value=3000,
-        max_value=25000,
-        value=10000,
+        max_value=20000,
+        value=8000,
         step=1000,
-        help="Define o tamanho de cada bloco de áudio."
-    )
-    
-    frases_repetidas = st.number_input(
-        "Frases a repetir no início de cada Parte",
-        min_value=0,
-        max_value=3,
-        value=1,
-        help="Garante a continuidade entre as partes individuais."
+        help="Define a duração de cada faixa de áudio."
     )
 
-# --- FUNÇÃO DE LIMPEZA AVANÇADA DE GUIÕES E SEPARADORES ---
-def limpar_instrucoes_guiom(texto: str) -> str:
-    texto_limpo = re.sub(r'\[.*?\]', '', texto)
-    linhas = texto_limpo.split('\n')
-    linhas_filtradas = []
+# --- ANALISADOR PROFUNDO DO GUIÃO (PARSER CÉNICO) ---
+def analisar_guiao_em_segmentos(texto_bruto: str, anunciar_cap: bool) -> list[dict]:
+    """
+    Transforma o guião numa sequência de eventos de áudio:
+    - {'tipo': 'fala', 'texto': '...', 'rate': '-5%', 'pitch': '-2Hz'}
+    - {'tipo': 'pausa', 'segundos': 3.0}
+    Ignora cabeçalhos técnicos, metadados, créditos de texto e separadores.
+    """
+    linhas = texto_bruto.split('\n')
+    segmentos = []
     
-    padroes_ignorar = re.compile(
-        r'^(CAPÍTULO\s+\d+|PARTE\s+[A-ZÀ-Ú]+|O CONCEITO|A CIÊNCIA|A FERRAMENTA|REFLEXÃO|A PONTE|FIM DO CAPÍTULO|DURAÇÃO ESTIMADA|FORMATO|MÚSICA|PAUSAS|ESTRUTURA POR CAPÍTULO|TOM GERAL)',
+    # Estilo base ("conversa à beira da lareira: íntimo, sem pressa")
+    rate_atual = "-6%"
+    pitch_atual = "-1Hz"
+    buffer_fala = []
+    
+    # Estado para ignorar o bloco inicial de especificações técnicas e créditos finais
+    em_cabecalho_inicial = True
+    em_creditos_finais = False
+
+    def descarregar_fala():
+        if buffer_fala:
+            texto_bloco = " ".join(buffer_fala).strip()
+            texto_bloco = re.sub(r'\s+', ' ', texto_bloco)
+            if texto_bloco:
+                segmentos.append({
+                    'tipo': 'fala',
+                    'texto': texto_bloco,
+                    'rate': rate_atual,
+                    'pitch': pitch_atual
+                })
+            buffer_fala.clear()
+
+    # Expressões regulares de limpeza rigorosa baseadas na análise do ficheiro
+    re_separador = re.compile(r'^[=\-_*#]{3,}$')
+    re_pausa = re.compile(r'^\[P:\s*(\d+(?:\.\d+)?)s\]$', re.IGNORECASE)
+    re_musica = re.compile(r'^\[MÚSICA:.*?\]$', re.IGNORECASE)
+    re_narrador = re.compile(r'^\[NARRADOR\s*[—\-:]\s*(.*?)\]$', re.IGNORECASE)
+    re_fim = re.compile(r'^\[FIM.*?\]$', re.IGNORECASE)
+    
+    # Cabeçalhos internos das 6 secções que NÃO devem ser lidos em voz alta
+    re_seccoes_ocultas = re.compile(
+        r'^(\d+\.\s*)?(O CONCEITO|A CIÊNCIA|A FERRAMENTA.*|REFLEXÃO|A PONTE.*)$',
         re.IGNORECASE
     )
     
+    # Títulos de Capítulos e Partes (que definem o início real do livro)
+    re_capitulo_ou_parte = re.compile(
+        r'^(CAPÍTULO\s+\d+[A-Z]?\s*[—\-].+|PARTE\s+[A-ZÀ-Ú]+\s*[—\-].+|EPÍLOGO\s*[—\-].+|O SISTEMA MÍNIMO|NOTAS FINAIS)$',
+        re.IGNORECASE
+    )
+
     for linha in linhas:
-        linha_strip = linha.strip()
-        if re.match(r'^[=\-_*#]{3,}$', linha_strip):
+        l = linha.strip()
+        if not l:
             continue
-        if padroes_ignorar.match(linha_strip):
+            
+        # 1. Detetar entrada nos Créditos Finais (para não ler "[Nome do adaptador]", etc.)
+        if re.match(r'^CRÉDITOS DO AUDIOBOOK$', l, re.IGNORECASE):
+            descarregar_fala()
+            em_creditos_finais = True
             continue
-        linhas_filtradas.append(linha)
+            
+        if em_creditos_finais:
+            if l.lower().startswith("obrigado por ouvires"):
+                segmentos.append({'tipo': 'pausa', 'segundos': 2.0})
+                segmentos.append({'tipo': 'fala', 'texto': l, 'rate': '-10%', 'pitch': '-2Hz'})
+            continue
+
+        # 2. Ignorar linhas de separação visual (==========)
+        if re_separador.match(l):
+            continue
+
+        # 3. Detetar Capítulos / Partes (Desbloqueia o início do livro após a ficha técnica)
+        if re_capitulo_ou_parte.match(l):
+            em_cabecalho_inicial = False
+            descarregar_fala()
+            segmentos.append({'tipo': 'pausa', 'segundos': 2.0})
+            if anunciar_cap:
+                # Substitui travessão por pausa de pontuação para leitura solene
+                titulo_limpo = re.sub(r'\s*[—\-]\s*', '. ', l).capitalize()
+                # Corrige numeração romana/específica se existir
+                titulo_limpo = re.sub(r'17b', '17 B', titulo_limpo, flags=re.IGNORECASE)
+                segmentos.append({
+                    'tipo': 'fala',
+                    'texto': f"{titulo_limpo}.",
+                    'rate': '-10%',
+                    'pitch': '-2Hz'
+                })
+                segmentos.append({'tipo': 'pausa', 'segundos': 2.5})
+            continue
+
+        # Se ainda estamos na ficha técnica antes do Capítulo 1, ignorar tudo
+        if em_cabecalho_inicial:
+            continue
+
+        # 4. Ignorar cabeçalhos de subsecções ("2. O CONCEITO", "4. A FERRAMENTA...", etc.)
+        if re_seccoes_ocultas.match(l):
+            descarregar_fala()
+            segmentos.append({'tipo': 'pausa', 'segundos': 1.5})
+            continue
+
+        # 5. Ignorar marcadores de fecho ([FIM DO CAPÍTULO 1], [FIM])
+        if re_fim.match(l):
+            descarregar_fala()
+            segmentos.append({'tipo': 'pausa', 'segundos': 3.0})
+            continue
+
+        # 6. Interpretar indicações de Música ([MÚSICA: Piano suave...])
+        if re_musica.match(l):
+            descarregar_fala()
+            # Insere uma pausa atmosférica de transição onde entraria a música
+            segmentos.append({'tipo': 'pausa', 'segundos': 2.5})
+            continue
+
+        # 7. Interpretar Pausas explícitas ([P: 3s], [P: 8s])
+        m_pausa = re_pausa.match(l)
+        if m_pausa:
+            descarregar_fala()
+            seg = float(m_pausa.group(1))
+            segmentos.append({'tipo': 'pausa', 'segundos': seg})
+            continue
+
+        # 8. Interpretar Mudanças de Tom do Narrador ([NARRADOR — tom íntimo...])
+        m_narrador = re_narrador.match(l)
+        if m_narrador:
+            descarregar_fala()
+            instrucao_tom = m_narrador.group(1).lower()
+            if "pausado" in instrucao_tom or "reflex" in instrucao_tom or "despedida" in instrucao_tom:
+                rate_atual = "-14%"
+                pitch_atual = "-3Hz"
+            elif "sóbrio" in instrucao_tom or "grave" in instrucao_tom:
+                rate_atual = "-10%"
+                pitch_atual = "-4Hz"
+            elif "íntimo" in instrucao_tom or "próximo" in instrucao_tom:
+                rate_atual = "-8%"
+                pitch_atual = "-2Hz"
+            elif "informativo" in instrucao_tom or "claro" in instrucao_tom:
+                rate_atual = "-2%"
+                pitch_atual = "+0Hz"
+            elif "prático" in instrucao_tom:
+                rate_atual = "-4%"
+                pitch_atual = "+0Hz"
+            else:
+                rate_atual = "-6%"
+                pitch_atual = "-1Hz"
+            continue
+
+        # 9. Limpeza de marcadores inline no meio das frases (ex: "sábado [deixa], o telefone...")
+        l_limpa = re.sub(r'\[.*?\]', '', l)
         
-    texto_final = "\n".join(linhas_filtradas)
-    texto_final = re.sub(r'[=\-_*#]{3,}', '', texto_final)
-    return texto_final
+        # 10. Tratamento de caracteres especiais do guião:
+        # Substituir setas "→" por pontuação pausada
+        l_limpa = l_limpa.replace('→', '... ')
+        # Substituir linhas de espaço em branco "______" por reticências silenciosas
+        l_limpa = re.sub(r'_{2,}', '...', l_limpa)
+        # Melhorar pausas de travessões em finais de linha
+        if l_limpa.endswith('—'):
+            l_limpa = l_limpa[:-1].strip() + '...'
+        else:
+            l_limpa = l_limpa.replace(' — ', ', ')
 
-# --- FUNÇÃO DE EXTRAÇÃO UNIVERSAL BLINDADA ---
-def extrair_documento_universal(file_bytes: bytes, extensao: str) -> str:
-    try:
-        doc = fitz.open(stream=file_bytes, filetype=extensao)
-        texto = []
-        for pagina in doc:
-            t = pagina.get_text("text").replace("\n", " ").strip()
-            if t:
-                texto.append(t)
-        doc.close()
-        resultado = " ".join(texto).strip()
-        if resultado:
-            return limpar_instrucoes_guiom(resultado)
-    except Exception:
-        pass
+        l_limpa = l_limpa.strip()
+        if not l_limpa:
+            continue
 
-    try:
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        texto = []
-        for pagina in doc:
-            t = pagina.get_text("text").replace("\n", " ").strip()
-            if t:
-                texto.append(t)
-        doc.close()
-        resultado = " ".join(texto).strip()
-        if resultado:
-            return limpar_instrucoes_guiom(resultado)
-    except Exception:
-        pass
+        # Garantir que linhas isoladas (estilo poético do guião) terminam com pontuação suave
+        # para que o sintetizador respire entre linhas como pretendido pelo autor
+        if l_limpa[-1] not in '.!?:;,…"\'”':
+            l_limpa += '.'
 
-    try:
-        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
-            textos_html = []
-            for nome in sorted(z.namelist()):
-                if nome.lower().endswith(('.xhtml', '.html', '.htm', '.xml')):
-                    if 'toc' in nome.lower() or 'meta' in nome.lower() or 'container' in nome.lower():
-                        continue
-                    conteudo = z.read(nome)
-                    soup = BeautifulSoup(conteudo, "html.parser")
-                    for tag in soup(["script", "style"]):
-                        tag.decompose()
-                    t = soup.get_text(separator=" ").strip()
-                    if t:
-                        textos_html.append(t)
-            resultado = " ".join(textos_html).strip()
-            if resultado:
-                return limpar_instrucoes_guiom(resultado)
-    except Exception:
-        pass
+        buffer_fala.append(l_limpa)
 
-    texto_bruto = file_bytes.decode("utf-8", errors="ignore").strip()
-    return limpar_instrucoes_guiom(texto_bruto)
+    descarregar_fala()
+    return segmentos
 
-def separar_em_frases(texto: str) -> list[str]:
-    texto_limpo = re.sub(r'\s+', ' ', texto).strip()
-    frases = re.split(r'(?<=[.!?])\s+', texto_limpo)
-    return [f.strip() for f in frases if f.strip()]
-
-def dividir_partes_base(frases: list[str], max_chars_parte: int) -> list[list[str]]:
+# --- AGRUPADOR DE SEGMENTOS EM PARTES ---
+def agrupar_segmentos_em_partes(segmentos: list[dict], max_chars: int) -> list[list[dict]]:
     partes = []
     parte_atual = []
-    tamanho_atual = 0
-    
-    for frase in frases:
-        if tamanho_atual + len(frase) + 1 <= max_chars_parte or not parte_atual:
-            parte_atual.append(frase)
-            tamanho_atual += len(frase) + 1
+    chars_atuais = 0
+
+    for seg in segmentos:
+        if seg['tipo'] == 'fala':
+            tam = len(seg['texto'])
+            if chars_atuais + tam > max_chars and parte_atual:
+                partes.append(parte_atual)
+                parte_atual = [seg]
+                chars_atuais = tam
+            else:
+                parte_atual.append(seg)
+                chars_atuais += tam
         else:
-            partes.append(parte_atual)
-            parte_atual = [frase]
-            tamanho_atual = len(frase) + 1
-            
+            parte_atual.append(seg)
+
     if parte_atual:
         partes.append(parte_atual)
     return partes
 
-async def gerar_audio_texto(texto: str, voice: str) -> bytes:
-    if not texto.strip():
-        return b""
-    communicate = edge_tts.Communicate(texto, voice)
-    mp3_buffer = io.BytesIO()
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            mp3_buffer.write(chunk["data"])
-    return mp3_buffer.getvalue()
+# --- SINTETIZADOR DE UMA PARTE COMPLETA (COM PAUSAS E PROSÓDIA) ---
+async def sintetizar_parte(lista_segmentos: list[dict], voice: str, usar_pausas: bool, usar_tom: bool) -> bytes:
+    buffer_parte = io.BytesIO()
+    
+    for seg in lista_segmentos:
+        if seg['tipo'] == 'pausa':
+            if usar_pausas:
+                # Limita pausas muito longas a um máximo razoável (ex: 8s intactos)
+                duracao = min(seg['segundos'], 10.0)
+                buffer_parte.write(gerar_silencio_mp3(duracao))
+        elif seg['tipo'] == 'fala':
+            texto = seg['texto']
+            if not texto:
+                continue
+            rate = seg['rate'] if usar_tom else "+0%"
+            pitch = seg['pitch'] if usar_tom else "+0Hz"
+            
+            communicate = edge_tts.Communicate(texto, voice, rate=rate, pitch=pitch)
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    buffer_parte.write(chunk["data"])
+                    
+    return buffer_parte.getvalue()
 
-# --- INICIALIZAR MEMÓRIA DA SESSÃO ---
+# --- MEMÓRIA DA SESSÃO ---
 if "arquivos_partes" not in st.session_state:
     st.session_state.arquivos_partes = []
 if "audio_completo" not in st.session_state:
@@ -172,11 +297,10 @@ if "livro_nome" not in st.session_state:
     st.session_state.livro_nome = ""
 
 # --- INTERFACE PRINCIPAL ---
-uploaded_file = st.file_uploader("Escolhe o ficheiro do livro ou guião", type=["pdf", "epub", "txt"])
+uploaded_file = st.file_uploader("Carrega o guião do audiolivro (.txt, .pdf, .epub)", type=["txt", "pdf", "epub"])
 
 if uploaded_file is not None:
     file_bytes = uploaded_file.read()
-    extensao = uploaded_file.name.split(".")[-1].lower()
     nome_base = uploaded_file.name.rsplit(".", 1)[0]
     
     if st.session_state.livro_nome != uploaded_file.name:
@@ -184,135 +308,130 @@ if uploaded_file is not None:
         st.session_state.arquivos_partes = []
         st.session_state.audio_completo = None
 
-    with st.spinner("A analisar e a limpar instruções e separadores do guião..."):
-        texto_extraido = extrair_documento_universal(file_bytes, extensao)
-        todas_as_frases = separar_em_frases(texto_extraido)
-        partes_limpas = dividir_partes_base(todas_as_frases, chars_por_parte)
-        
-    total_partes = len(partes_limpas)
+    texto_bruto = file_bytes.decode("utf-8", errors="ignore")
     
-    if total_partes == 0 or len(texto_extraido) < 10:
-        st.error("❌ Não foi possível extrair texto legível deste ficheiro.")
-    else:
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total de Caracteres", f"{len(texto_extraido):,}")
-        col2.metric("Total de Frases", f"{len(todas_as_frases):,}")
-        col3.metric("Partes Calculadas", total_partes)
+    with st.spinner("A fazer análise cénica do guião (pausas, tons e estrutura)..."):
+        segmentos = analisar_guiao_em_segmentos(texto_bruto, ler_titulos_cap)
+        partes_segmentadas = agrupar_segmentos_em_partes(segmentos, chars_por_parte)
         
-        with st.expander("🔍 Pré-visualizar Texto Limpo (Sem Separadores nem Instruções)"):
-            st.write(texto_extraido[:1000] + "...")
-        
-        st.subheader("🎯 Intervalo a Processar")
-        col_inicio, col_fim = st.columns(2)
-        parte_inicial = col_inicio.number_input("Começar na Parte", min_value=1, max_value=total_partes, value=1)
-        parte_final = col_fim.number_input("Terminar na Parte", min_value=parte_inicial, max_value=total_partes, value=total_partes)
-        
-        if st.button("🚀 Gerar Áudios", type="primary", use_container_width=True):
-            st.session_state.arquivos_partes = []
-            st.session_state.audio_completo = None
-            
-            indices_selecionados = list(range(parte_inicial - 1, parte_final))
-            total_selecionadas = len(indices_selecionados)
-            
-            gerar_partes = modo_geracao in ["Vários Áudios (Por Partes)", "Ambos (Partes + Áudio Completo)"]
-            gerar_completo = modo_geracao in ["Áudio Único (Livro Completo)", "Ambos (Partes + Áudio Completo)"]
-            
-            lista_partes_temp = []
-            buffer_completo = io.BytesIO()
-            
-            status_container = st.empty()
-            barra_progresso = st.progress(0)
-            
-            for step, idx_real in enumerate(indices_selecionados):
-                num_parte_humana = idx_real + 1
-                status_container.info(f"🔄 A gerar Parte {num_parte_humana} de {parte_final}...")
-                barra_progresso.progress((step + 1) / total_selecionadas)
-                
-                frases_atuais = partes_limpas[idx_real]
-                texto_limpo_bloco = " ".join(frases_atuais)
-                
-                audio_limpo_bytes = asyncio.run(gerar_audio_texto(texto_limpo_bloco, voice_id))
-                
-                if gerar_completo and audio_limpo_bytes:
-                    buffer_completo.write(audio_limpo_bytes)
-                    
-                if gerar_partes and audio_limpo_bytes:
-                    if idx_real > 0 and frases_repetidas > 0:
-                        frases_overlap = partes_limpas[idx_real - 1][-frases_repetidas:]
-                        texto_overlap = " ".join(frases_overlap)
-                        audio_overlap_bytes = asyncio.run(gerar_audio_texto(texto_overlap, voice_id))
-                        audio_final_parte = audio_overlap_bytes + audio_limpo_bytes
-                        primeira_frase_mostrar = frases_overlap[0]
-                    else:
-                        audio_final_parte = audio_limpo_bytes
-                        primeira_frase_mostrar = frases_atuais[0]
-                        
-                    nome_ficheiro_mp3 = f"{nome_base}_Parte_{num_parte_humana:02d}.mp3"
-                    lista_partes_temp.append((nome_ficheiro_mp3, audio_final_parte, primeira_frase_mostrar))
-            
-            status_container.empty()
-            barra_progresso.empty()
-            
-            if gerar_partes:
-                st.session_state.arquivos_partes = lista_partes_temp
-            if gerar_completo:
-                nome_completo = f"{nome_base}_Audiolivro_Completo.mp3"
-                st.session_state.audio_completo = (nome_completo, buffer_completo.getvalue())
-                
-            st.success("🎉 Processamento concluído com sucesso! Podes ouvir e descarregar abaixo.")
+    total_partes = len(partes_segmentadas)
+    total_falas = sum(1 for s in segmentos if s['tipo'] == 'fala')
+    total_pausas = sum(1 for s in segmentos if s['tipo'] == 'pausa')
+    total_chars = sum(len(s['texto']) for s in segmentos if s['tipo'] == 'fala')
 
-# --- MOSTRAR RESULTADOS GUARDADOS NA SESSÃO ---
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Caracteres de Locução", f"{total_chars:,}")
+    col2.metric("Blocos de Entoação", f"{total_falas:,}")
+    col3.metric("Pausas [P: Xs] Ativas", f"{total_pausas:,}")
+    col4.metric("Partes Calculadas", total_partes)
+
+    with st.expander("🔍 Inspecionar Guião Interpretado (Como o Narrador vai ler)"):
+        amostra = []
+        for s in segmentos[:25]:
+            if s['tipo'] == 'pausa':
+                amostra.append(f"⏸️ *[Silêncio de {s['segundos']}s]*")
+            else:
+                amostra.append(f"🎙️ **(Vel: {s['rate']} | Tom: {s['pitch']})**: {s['texto']}")
+        st.markdown("\n\n".join(amostra))
+
+    st.subheader("🎯 Intervalo de Gravação")
+    col_ini, col_fim = st.columns(2)
+    parte_inicial = col_ini.number_input("Começar na Parte", min_value=1, max_value=total_partes, value=1)
+    parte_final = col_fim.number_input("Terminar na Parte", min_value=parte_inicial, max_value=total_partes, value=total_partes)
+
+    if st.button("🚀 Iniciar Gravação com Direção de Voz", type="primary", use_container_width=True):
+        st.session_state.arquivos_partes = []
+        st.session_state.audio_completo = None
+        
+        indices = list(range(parte_inicial - 1, parte_final))
+        total_a_gerar = len(indices)
+        
+        gerar_partes = modo_geracao in ["Vários Áudios (Por Partes)", "Ambos (Partes + Áudio Completo)"]
+        gerar_completo = modo_geracao in ["Áudio Único (Livro Completo)", "Ambos (Partes + Áudio Completo)"]
+        
+        buffer_completo = io.BytesIO()
+        status_box = st.empty()
+        progresso = st.progress(0)
+        
+        st.markdown("---")
+        st.subheader("⚡ Ficheiros Gerados em Tempo Real")
+        container_tempo_real = st.container()
+
+        for step, idx in enumerate(indices):
+            num_parte = idx + 1
+            status_box.info(f"🎙️ A gravar Parte {num_parte} de {parte_final} (A aplicar pausas e entoação)...")
+            
+            segs_parte = partes_segmentadas[idx]
+            audio_bytes = asyncio.run(sintetizar_parte(segs_parte, voice_id, interpretar_pausas, modular_tom))
+            
+            if gerar_completo and audio_bytes:
+                buffer_completo.write(audio_bytes)
+                
+            primeira_fala = next((s['texto'] for s in segs_parte if s['tipo'] == 'fala'), "Início da parte...")
+            nome_mp3 = f"{nome_base}_Parte_{num_parte:02d}.mp3"
+            
+            if gerar_partes and audio_bytes:
+                st.session_state.arquivos_partes.append((nome_mp3, audio_bytes, primeira_fala))
+                # Mostra imediatamente a parte acabada de criar no ecrã!
+                with container_tempo_real:
+                    with st.container(border=True):
+                        st.markdown(f"✅ **{nome_mp3}** *(Pronto!)*")
+                        st.caption(f"Excerto: \"{primeira_fala[:110]}...\"")
+                        st.audio(audio_bytes, format="audio/mp3")
+                        st.download_button(
+                            label=f"📥 Descarregar {nome_mp3}",
+                            data=audio_bytes,
+                            file_name=nome_mp3,
+                            mime="audio/mp3",
+                            key=f"realtime_dl_{num_parte}"
+                        )
+            
+            progresso.progress((step + 1) / total_a_gerar)
+
+        status_box.empty()
+        progresso.empty()
+        
+        if gerar_completo:
+            nome_comp = f"{nome_base}_Audiolivro_Completo.mp3"
+            st.session_state.audio_completo = (nome_comp, buffer_completo.getvalue())
+            
+        st.success("🎉 Gravação concluída com sucesso!")
+
+# --- SECÇÃO FIXA PARA DOWNLOADS E PACOTE ZIP ---
 if st.session_state.audio_completo or st.session_state.arquivos_partes:
     st.markdown("---")
-    st.subheader("📥 Áudios Prontos para Ouvir e Descarregar")
+    st.subheader("📦 Pacote Final Concluído")
     
     if st.session_state.audio_completo:
         nome_comp, bytes_comp = st.session_state.audio_completo
         with st.container(border=True):
-            st.markdown("### 🏆 Áudio Único (Livro Completo)")
+            st.markdown("### 🏆 Áudio Único (Obra Completa)")
             st.audio(bytes_comp, format="audio/mp3")
             st.download_button(
-                label=f"📥 Descarregar Áudio Completo ({nome_comp})",
+                label=f"📥 Descarregar Obra Completa ({nome_comp})",
                 data=bytes_comp,
                 file_name=nome_comp,
                 mime="audio/mp3",
                 type="primary",
                 use_container_width=True,
-                key="dl_completo_unico"
+                key="dl_comp_final"
             )
 
     if st.session_state.arquivos_partes:
-        st.markdown("### 📚 Áudios Divididos por Partes")
-        arquivos_para_zip = []
-        
-        for idx, (nome_mp3, audio_bytes, primeira_frase) in enumerate(st.session_state.arquivos_partes):
-            arquivos_para_zip.append((nome_mp3, audio_bytes))
-            with st.container(border=True):
-                st.markdown(f"**🎵 {nome_mp3}**")
-                st.caption(f"Início: \"{primeira_frase[:100]}...\"")
-                st.audio(audio_bytes, format="audio/mp3")
-                st.download_button(
-                    label=f"📥 Descarregar {nome_mp3}",
-                    data=audio_bytes,
-                    file_name=nome_mp3,
-                    mime="audio/mp3",
-                    key=f"dl_parte_{idx}"
-                )
-                
         zip_buffer = io.BytesIO()
-        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for nome_mp3, dados_mp3 in arquivos_para_zip:
-                zip_file.writestr(nome_mp3, dados_mp3)
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+            for nome_mp3, dados_mp3, _ in st.session_state.arquivos_partes:
+                zf.writestr(nome_mp3, dados_mp3)
             if st.session_state.audio_completo:
-                nome_comp, bytes_comp = st.session_state.audio_completo
-                zip_file.writestr(nome_comp, bytes_comp)
+                n_c, b_c = st.session_state.audio_completo
+                zf.writestr(n_c, b_c)
                 
         st.download_button(
-            label="📦 Descarregar Tudo num Ficheiro ZIP",
+            label="📦 Descarregar Todas as Partes num Ficheiro ZIP",
             data=zip_buffer.getvalue(),
-            file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Pacote_Audiolivro.zip",
+            file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Audiolivro_VIP.zip",
             mime="application/zip",
             type="primary",
             use_container_width=True,
-            key="dl_zip_total"
+            key="dl_zip_final"
         )
