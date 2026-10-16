@@ -1,16 +1,17 @@
 import streamlit as st
-from google.cloud import texttospeech
+import asyncio
+import edge_tts
 import io
 import re
 import json
 import zipfile
 
-st.set_page_config(page_title="Estúdio Profissional de Audiolivros (Google Cloud TTS)", page_icon="🎧", layout="centered")
+st.set_page_config(page_title="Estúdio Profissional de Audiolivros", page_icon="🎧", layout="centered")
 
-st.title("🎧 Estúdio Profissional de Audiolivros — Google Cloud TTS")
+st.title("🎧 Estúdio Profissional de Audiolivros")
 st.markdown(
-    "Processamento avançado integrado com as vozes neurais de alta fidelidade da **Google Cloud**, "
-    "garantindo qualidade de estúdio profissional e suporte nativo a pausas calibradas."
+    "Processamento avançado de guiões com **ritmo natural optimizado (-10%)**, "
+    "detecção robusta de capítulos e pausas calibradas."
 )
 
 # --- FUNÇÃO PARA LIMPAR NOMES DE FICHEIROS ---
@@ -20,7 +21,7 @@ def limpar_nome_ficheiro(texto: str) -> str:
     texto = re.sub(r'[^\w_]', '', texto)
     return texto.lower()
 
-# --- PARSER CÉNICO POR CAPÍTULOS ---
+# --- PARSER CÉNICO ROBUSTO POR CAPÍTULOS ---
 def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) -> list[dict]:
     linhas = texto_bruto.split('\n')
     capitulos = []
@@ -28,7 +29,11 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
     capitulo_atual = None
     parte_pendente = None
 
+    # Ritmo base ajustado para -10% para uma narração mais natural e pausada
+    rate_atual = "-10%"
+    pitch_atual = "-2Hz"
     buffer_fala = []
+
     em_cabecalho_inicial = True
     em_creditos_finais = False
 
@@ -44,6 +49,8 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
     )
 
     re_parte = re.compile(r'^PARTE\s+[A-ZÀ-Ú0-9]+(?:\s*[—\-:]\s*.+)?$', re.IGNORECASE)
+    
+    # Regex melhorada para apanhar todas as variantes de capítulos, epílogos, notas e sistema mínimo
     re_capitulo = re.compile(
         r'^(CAPÍTULO\s+\d+[A-Z]?(?:\s*[—\-:].*)?|EPÍLOGO(?:\s*[—\-:].*)?|O SISTEMA MÍNIMO|NOTAS FINAIS|FONTES E FUNDAMENTOS)$',
         re.IGNORECASE
@@ -56,7 +63,9 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
             if texto_bloco:
                 capitulo_atual['segmentos'].append({
                     'tipo': 'fala',
-                    'texto': texto_bloco
+                    'texto': texto_bloco,
+                    'rate': rate_atual,
+                    'pitch': pitch_atual
                 })
             buffer_fala.clear()
 
@@ -81,7 +90,9 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
                 capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.0})
                 capitulo_atual['segmentos'].append({
                     'tipo': 'fala',
-                    'texto': f"{parte_audio}."
+                    'texto': f"{parte_audio}.",
+                    'rate': '-10%',
+                    'pitch': '-2Hz'
                 })
                 capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
             parte_pendente = None
@@ -90,7 +101,9 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
             capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.0})
             capitulo_atual['segmentos'].append({
                 'tipo': 'fala',
-                'texto': f"{titulo_limpo_audio}."
+                'texto': f"{titulo_limpo_audio}.",
+                'rate': '-8%',
+                'pitch': '-2Hz'
             })
             capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
 
@@ -109,7 +122,9 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
                 capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
                 capitulo_atual['segmentos'].append({
                     'tipo': 'fala',
-                    'texto': l
+                    'texto': l,
+                    'rate': '-10%',
+                    'pitch': '-2Hz'
                 })
             continue
 
@@ -157,6 +172,25 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
         m_narrador = re_narrador.match(l)
         if m_narrador:
             descarregar_fala()
+            instrucao_tom = m_narrador.group(1).lower()
+            if "pausado" in instrucao_tom or "reflex" in instrucao_tom or "despedida" in instrucao_tom:
+                rate_atual = "-12%"
+                pitch_atual = "-3Hz"
+            elif "sóbrio" in instrucao_tom or "grave" in instrucao_tom:
+                rate_atual = "-10%"
+                pitch_atual = "-4Hz"
+            elif "íntimo" in instrucao_tom or "próximo" in instrucao_tom:
+                rate_atual = "-10%"
+                pitch_atual = "-2Hz"
+            elif "informativo" in instrucao_tom or "claro" in instrucao_tom:
+                rate_atual = "-6%"
+                pitch_atual = "-1Hz"
+            elif "prático" in instrucao_tom:
+                rate_atual = "-8%"
+                pitch_atual = "-1Hz"
+            else:
+                rate_atual = "-10%"
+                pitch_atual = "-2Hz"
             continue
 
         l_limpa = re.sub(r'\[.*?\]', '', l)
@@ -190,63 +224,59 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
 
     return capitulos_validos
 
-# --- MOTOR DE GRAVAÇÃO GOOGLE CLOUD TTS ---
-def gravar_audio_google(segmentos_cap: list[dict], voz_nome: str, velocidade: float) -> bytes:
-    client = texttospeech.TextToSpeechClient()
+# --- FUNÇÃO DE SILÊNCIO NATIVO ---
+async def obter_frame_silencio_nativo(voice: str) -> bytes:
+    try:
+        communicate = edge_tts.Communicate("ponto", voice)
+        chunks = []
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                chunks.append(chunk["data"])
+        if chunks:
+            ultimo = chunks[-1]
+            return ultimo[-288:] if len(ultimo) >= 288 else ultimo
+    except Exception:
+        pass
+    return b'\x00' * 320
+
+async def gravar_audio_capitulo(segmentos_cap: list[dict], voice: str) -> bytes:
     buffer_final = io.BytesIO()
+    silencio_base = None
 
     for b in segmentos_cap:
         if b['tipo'] == 'pausa':
-            segundos = b['segundos']
-            ssml_pausa = f'<speak><break time="{int(segundos * 1000)}ms"/></speak>'
-            input_ssml = texttospeech.SynthesisInput(ssml=ssml_pausa)
-            voice = texttospeech.VoiceSelectionParams(
-                language_code="pt-PT",
-                name=voz_nome,
-                ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL
-            )
-            audio_config = texttospeech.AudioConfig(
-                audio_encoding=texttospeech.AudioEncoding.MP3,
-                sample_rate_hertz=44100
-            )
-            try:
-                res = client.synthesize_speech(input=input_ssml, voice=voice, audio_config=audio_config)
-                buffer_final.write(res.audio_content)
-            except Exception:
-                pass
+            if silencio_base is None:
+                silencio_base = await obter_frame_silencio_nativo(voice)
+            if silencio_base:
+                repeticoes = int(b['segundos'] * 18)
+                buffer_final.write(silencio_base * max(1, repeticoes))
         elif b['tipo'] == 'fala':
-            input_text = texttospeech.SynthesisInput(text=b['texto'])
-            voice = texttospeech.VoiceSelectionParams(
-                language_code="pt-PT",
-                name=voz_nome,
-                ssml_gender=texttospeech.SsmlVoiceGender.NEUTRAL
+            communicate = edge_tts.Communicate(
+                b['texto'],
+                voice,
+                rate=b['rate'],
+                pitch=b['pitch']
             )
-            audio_config = texttospeech.AudioConfig(
-                audio_encoding=texttospeech.AudioEncoding.MP3,
-                speaking_rate=velocidade,
-                sample_rate_hertz=44100
-            )
-            res = client.synthesize_speech(input=input_text, voice=voice, audio_config=audio_config)
-            buffer_final.write(res.audio_content)
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    buffer_final.write(chunk["data"])
 
     return buffer_final.getvalue()
 
 # --- BARRA LATERAL ---
 with st.sidebar:
-    st.header("🎙️ Google Cloud TTS")
-    
+    st.header("🎙️ Direção de Voz")
     vozes_disponiveis = {
-        "🇵🇹 Neural2-B (Masculina - PT)": "pt-PT-Neural2-B",
-        "🇵🇹 Neural2-A (Feminina - PT)": "pt-PT-Neural2-A",
-        "🇵🇹 Neural2-C (Masculina Alternativa - PT)": "pt-PT-Neural2-C",
-        "🇵🇹 Neural2-D (Feminina Alternativa - PT)": "pt-PT-Neural2-D"
+        "🇵🇹 Duarte (PT - Masculina / Íntima)": "pt-PT-DuarteNeural",
+        "🇵🇹 Raquel (PT - Feminina / Natural)": "pt-PT-RaquelNeural",
+        "🇧🇷 Antonio (BR - Masculina / Profunda)": "pt-BR-AntonioNeural",
+        "🇧🇷 Francisca (BR - Feminina / Suave)": "pt-BR-FranciscaNeural"
     }
-    
-    voz_selecionada = st.selectbox("Voz Neural Google", list(vozes_disponiveis.keys()))
+    voz_selecionada = st.selectbox("Narrador", list(vozes_disponiveis.keys()))
     voice_id = vozes_disponiveis[voz_selecionada]
-    
-    velocidade_narracao = st.slider("Velocidade da Fala", min_value=0.80, max_value=1.00, value=0.92, step=0.01)
+
     anunciar_capitulos = st.checkbox("Anunciar títulos de Partes e Capítulos", value=True)
+    fazer_overlap = st.checkbox("Repetir última frase da faixa anterior no início da seguinte", value=False)
 
 # --- MEMÓRIA DA SESSÃO ---
 if "arquivos_gerados" not in st.session_state:
@@ -290,7 +320,7 @@ if uploaded_file is not None:
     c_ini = col_i.number_input("Começar no Capítulo", min_value=1, max_value=total_caps, value=1)
     c_fim = col_f.number_input("Terminar no Capítulo", min_value=c_ini, max_value=total_caps, value=total_caps)
 
-    if st.button("🚀 Gerar Audiolivro com Google Cloud TTS", type="primary", use_container_width=True):
+    if st.button("🚀 Gerar Audiolivro Profissional", type="primary", use_container_width=True):
         st.session_state.arquivos_gerados = []
         indices = list(range(c_ini - 1, c_fim))
 
@@ -300,17 +330,33 @@ if uploaded_file is not None:
 
         for step, idx in enumerate(indices):
             cap = capitulos[idx]
-            status.info(f"🎙️ A processar {cap['nome_mp3']} via Google Cloud [{step + 1}/{len(indices)}]...")
+            status.info(f"🎙️ A gravar {cap['nome_mp3']} ({step + 1} de {len(indices)})...")
 
             segs_a_gravar = list(cap['segmentos'])
-            audio_mp3 = gravar_audio_google(segs_a_gravar, voice_id, velocidade_narracao)
+
+            if idx > 0 and fazer_overlap:
+                falas_ant = [s for s in capitulos[idx - 1]['segmentos'] if s['tipo'] == 'fala']
+                if falas_ant:
+                    ult_bloco = falas_ant[-1]
+                    frases_ant = re.split(r'(?<=[.!?])\s+', ult_bloco['texto'])
+                    if frases_ant and frases_ant[-1].strip():
+                        segs_a_gravar.insert(0, {
+                            'tipo': 'fala',
+                            'texto': frases_ant[-1].strip(),
+                            'rate': ult_bloco['rate'],
+                            'pitch': ult_bloco['pitch']
+                        })
+                        segs_a_gravar.insert(1, {'tipo': 'pausa', 'segundos': 1.0})
+
+            audio_mp3 = asyncio.run(gravar_audio_capitulo(segs_a_gravar, voice_id))
             resumo_txt = next((s['texto'] for s in cap['segmentos'] if s['tipo'] == 'fala'), "")[:100]
 
             st.session_state.arquivos_gerados.append((cap['nome_mp3'], audio_mp3, resumo_txt))
 
             with area_tempo_real:
                 with st.container(border=True):
-                    st.markdown(f"✅ **{cap['nome_mp3']}** *(Google Cloud Neural2 | ~{cap['caracteres']:,} caracteres)*")
+                    st.markdown(f"✅ **{cap['nome_mp3']}** *(~{cap['caracteres']:,} caracteres)*")
+                    st.caption(f"\"{resumo_txt}...\"")
                     st.audio(audio_mp3, format="audio/mp3")
                     st.download_button(
                         f"📥 Descarregar {cap['nome_mp3']}",
@@ -324,7 +370,7 @@ if uploaded_file is not None:
 
         status.empty()
         prog.empty()
-        st.success("🎉 Todos os capítulos selecionados foram gerados com o Google Cloud TTS com sucesso!")
+        st.success("🎉 Todos os capítulos selecionados foram gravados com sucesso!")
 
 if len(st.session_state.arquivos_gerados) > 1:
     st.markdown("---")
@@ -333,9 +379,9 @@ if len(st.session_state.arquivos_gerados) > 1:
         for n_m, d_m, _ in st.session_state.arquivos_gerados:
             zf.writestr(n_m, d_m)
     st.download_button(
-        "📦 Descarregar Audiolivro Completo em ZIP (Google Cloud)",
+        "📦 Descarregar Audiolivro Completo em ZIP",
         data=zip_buf.getvalue(),
-        file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Google_Cloud_TTS.zip",
+        file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Capítulos_Completos.zip",
         mime="application/zip",
         type="primary",
         use_container_width=True
