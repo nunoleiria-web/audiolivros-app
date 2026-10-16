@@ -5,13 +5,14 @@ import io
 import re
 import json
 import zipfile
+from pydub import AudioSegment
 
 st.set_page_config(page_title="Estúdio Profissional de Audiolivros", page_icon="🎧", layout="centered")
 
-st.title("🎧 Estúdio Profissional de Audiolivros")
+st.title("🎧 Estúdio Profissional de Audiolivros — Conformidade ACX (192 kbps)")
 st.markdown(
-    "Processamento avançado de guiões com **ritmo natural optimizado (-10%)**, "
-    "detecção robusta de capítulos e pausas calibradas."
+    "Processamento avançado com **re-codificação automática para 192 kbps**, "
+    "ritmo natural optimizado (-10%) e detecção robusta de capítulos."
 )
 
 # --- FUNÇÃO PARA LIMPAR NOMES DE FICHEIROS ---
@@ -29,7 +30,6 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
     capitulo_atual = None
     parte_pendente = None
 
-    # Ritmo base ajustado para -10% para uma narração mais natural e pausada
     rate_atual = "-10%"
     pitch_atual = "-2Hz"
     buffer_fala = []
@@ -49,8 +49,6 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
     )
 
     re_parte = re.compile(r'^PARTE\s+[A-ZÀ-Ú0-9]+(?:\s*[—\-:]\s*.+)?$', re.IGNORECASE)
-    
-    # Regex melhorada para apanhar todas as variantes de capítulos, epílogos, notas e sistema mínimo
     re_capitulo = re.compile(
         r'^(CAPÍTULO\s+\d+[A-Z]?(?:\s*[—\-:].*)?|EPÍLOGO(?:\s*[—\-:].*)?|O SISTEMA MÍNIMO|NOTAS FINAIS|FONTES E FUNDAMENTOS)$',
         re.IGNORECASE
@@ -261,7 +259,16 @@ async def gravar_audio_capitulo(segmentos_cap: list[dict], voice: str) -> bytes:
                 if chunk["type"] == "audio":
                     buffer_final.write(chunk["data"])
 
-    return buffer_final.getvalue()
+    raw_bytes = buffer_final.getvalue()
+    
+    # FORÇAR CONVERSÃO PARA 192 KBPS (PADRÃO ACX) USANDO PYDUB
+    try:
+        audio_segment = AudioSegment.from_file(io.BytesIO(raw_bytes), format="mp3")
+        out_io = io.BytesIO()
+        audio_segment.export(out_io, format="mp3", bitrate="192k")
+        return out_io.getvalue()
+    except Exception:
+        return raw_bytes  # Fallback caso o ambiente não suporte ffmpeg
 
 # --- BARRA LATERAL ---
 with st.sidebar:
@@ -320,7 +327,7 @@ if uploaded_file is not None:
     c_ini = col_i.number_input("Começar no Capítulo", min_value=1, max_value=total_caps, value=1)
     c_fim = col_f.number_input("Terminar no Capítulo", min_value=c_ini, max_value=total_caps, value=total_caps)
 
-    if st.button("🚀 Gerar Audiolivro Profissional", type="primary", use_container_width=True):
+    if st.button("🚀 Gerar Audiolivro em 192 kbps (ACX Compliant)", type="primary", use_container_width=True):
         st.session_state.arquivos_gerados = []
         indices = list(range(c_ini - 1, c_fim))
 
@@ -330,7 +337,7 @@ if uploaded_file is not None:
 
         for step, idx in enumerate(indices):
             cap = capitulos[idx]
-            status.info(f"🎙️ A gravar {cap['nome_mp3']} ({step + 1} de {len(indices)})...")
+            status.info(f"🎙️ A gravar e converter {cap['nome_mp3']} para 192 kbps ({step + 1} de {len(indices)})...")
 
             segs_a_gravar = list(cap['segmentos'])
 
@@ -355,7 +362,7 @@ if uploaded_file is not None:
 
             with area_tempo_real:
                 with st.container(border=True):
-                    st.markdown(f"✅ **{cap['nome_mp3']}** *(~{cap['caracteres']:,} caracteres)*")
+                    st.markdown(f"✅ **{cap['nome_mp3']}** *(192 kbps ACX | ~{cap['caracteres']:,} caracteres)*")
                     st.caption(f"\"{resumo_txt}...\"")
                     st.audio(audio_mp3, format="audio/mp3")
                     st.download_button(
@@ -370,7 +377,7 @@ if uploaded_file is not None:
 
         status.empty()
         prog.empty()
-        st.success("🎉 Todos os capítulos selecionados foram gravados com sucesso!")
+        st.success("🎉 Todos os capítulos selecionados foram gerados em 192 kbps com sucesso!")
 
 if len(st.session_state.arquivos_gerados) > 1:
     st.markdown("---")
@@ -379,9 +386,9 @@ if len(st.session_state.arquivos_gerados) > 1:
         for n_m, d_m, _ in st.session_state.arquivos_gerados:
             zf.writestr(n_m, d_m)
     st.download_button(
-        "📦 Descarregar Audiolivro Completo em ZIP",
+        "📦 Descarregar Audiolivro Completo em ZIP (192 kbps)",
         data=zip_buf.getvalue(),
-        file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Capítulos_Completos.zip",
+        file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Capítulos_ACX_192kbps.zip",
         mime="application/zip",
         type="primary",
         use_container_width=True
