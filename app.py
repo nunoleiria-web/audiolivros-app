@@ -17,7 +17,7 @@ st.markdown(
 )
 
 # --- BOTÃO DE ACESSO RÁPIDO À PÁGINA DE VENDAS ---
-st.page_link("pages/loja.py", label="Visitar a Loja Oficial (EPUB & Audiolivro)", icon="📚")
+st.page_link("pages/Loja.py", label="Visitar a Loja Oficial (EPUB & Audiolivro)", icon="📚")
 
 st.markdown("---")
 
