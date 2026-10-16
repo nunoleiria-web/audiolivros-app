@@ -16,6 +16,11 @@ st.markdown(
     "detecção rigorosa de capítulos e geração estável e imediata."
 )
 
+# --- BOTÃO DE ACESSO RÁPIDO À PÁGINA DE VENDAS ---
+st.page_link("pages/Loja.py", label="Visitar a Loja Oficial (EPUB & Audiolivro)", icon="📚")
+
+st.markdown("---")
+
 # --- FUNÇÃO PARA LIMPAR NOMES DE FICHEIROS ---
 def limpar_nome_ficheiro(texto: str) -> str:
     texto = re.sub(r'\s*[—\-:]\s*', '_', texto.strip())
