@@ -1,17 +1,22 @@
-#!/usr/bin/env python3
-"""
-ESTÚDIO DE AUDIOLIVROS — VERSÃO STANDALONE
-Prepara o guião para síntese TTS externa (quando houver internet)
-Gera: ficheiro de segmentos JSON + instruções de gravação
-"""
-
+import streamlit as st
+import asyncio
+import edge_tts
+import io
 import re
 import json
-import sys
+import zipfile
 from pathlib import Path
 
-def analisar_guiao(texto_bruto: str, anunciar_cap: bool = True) -> list[dict]:
-    """Parser do guião para segmentos de áudio"""
+st.set_page_config(page_title="Estúdio Profissional de Audiolivros", page_icon="🎧", layout="centered")
+
+st.title("🎧 Estúdio Profissional de Audiolivros")
+st.markdown(
+    "Processamento avançado de guiões: analisa o texto, filtra comandos de palco, "
+    "aplica pausas exatas e gera vozes em Português de alta qualidade com controlo total."
+)
+
+# --- FUNÇÃO DE ANÁLISE DE GUIÃO (PARSER CÉNICO STANDALONE) ---
+def analisar_guiao_completo(texto_bruto: str, anunciar_cap: bool = True) -> list[dict]:
     linhas = texto_bruto.split('\n')
     segmentos = []
 
@@ -59,7 +64,6 @@ def analisar_guiao(texto_bruto: str, anunciar_cap: bool = True) -> list[dict]:
             continue
 
         linhas_processadas += 1
-
         if em_cabecalho_inicial and linhas_processadas > MAX_CABECALHO:
             em_cabecalho_inicial = False
 
@@ -162,9 +166,7 @@ def analisar_guiao(texto_bruto: str, anunciar_cap: bool = True) -> list[dict]:
     descarregar_fala()
     return segmentos
 
-
 def agrupar_em_partes(segmentos: list[dict], max_chars: int = 8000) -> list[list[dict]]:
-    """Agrupa segmentos em partes para gravação"""
     partes = []
     parte_atual = []
     chars_atuais = 0
@@ -186,109 +188,186 @@ def agrupar_em_partes(segmentos: list[dict], max_chars: int = 8000) -> list[list
         partes.append(parte_atual)
     return partes
 
+# --- FUNÇÃO DE SILÊNCIO NATIVO COMPATÍVEL ---
+async def obter_frame_silencio_nativo(voice: str) -> bytes:
+    communicate = edge_tts.Communicate("...", voice)
+    chunks = []
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            chunks.append(chunk["data"])
+    if chunks:
+        ultimo = chunks[-1]
+        return ultimo[-288:] if len(ultimo) >= 288 else ultimo
+    return b""
 
-def gerar_relatorio(partes: list[list[dict]], nome_base: str):
-    """Gera relatório de gravação"""
-    total_falas = sum(1 for p in partes for s in p if s['tipo'] == 'fala')
-    total_pausas = sum(1 for p in partes for s in p if s['tipo'] == 'pausa')
-    total_chars = sum(len(s['texto']) for p in partes for s in p if s['tipo'] == 'fala')
+async def gravar_parte_audio(blocos_parte: list[dict], voice: str) -> bytes:
+    buffer_final = io.BytesIO()
+    silencio_base = None
 
-    relatorio = f"""
-{'='*60}
-RELATÓRIO DE GRAVAÇÃO — {nome_base}
-{'='*60}
+    for b in blocos_parte:
+        if b['tipo'] == 'pausa':
+            if silencio_base is None:
+                silencio_base = await obter_frame_silencio_nativo(voice)
+            if silencio_base:
+                repeticoes = int(b['segundos'] * 18)
+                buffer_final.write(silencio_base * max(1, repeticoes))
+        elif b['tipo'] == 'fala':
+            communicate = edge_tts.Communicate(
+                b['texto'], 
+                voice, 
+                rate=b['rate'], 
+                pitch=b['pitch']
+            )
+            async for chunk in communicate.stream():
+                if chunk["type"] == "audio":
+                    buffer_final.write(chunk["data"])
 
-Total de partes: {len(partes)}
-Total de blocos de fala: {total_falas}
-Total de pausas: {total_pausas}
-Caracteres totais: {total_chars:,}
-Duração estimada: {total_chars / 9000:.1f} horas
+    return buffer_final.getvalue()
 
-{'='*60}
-INSTRUÇÕES DE GRAVAÇÃO
-{'='*60}
+# --- BARRA LATERAL: CONFIGURAÇÕES DE ESTÚDIO ---
+with st.sidebar:
+    st.header("🎙️ Direção de Voz")
+    
+    vozes_disponiveis = {
+        "🇵🇹 Duarte (PT - Masculina / Íntima)": "pt-PT-DuarteNeural",
+        "🇵🇹 Raquel (PT - Feminina / Natural)": "pt-PT-RaquelNeural",
+        "🇧🇷 Antonio (BR - Masculina / Profunda)": "pt-BR-AntonioNeural",
+        "🇧🇷 Francisca (BR - Feminina / Suave)": "pt-BR-FranciscaNeural"
+    }
+    
+    voz_selecionada = st.selectbox("Narrador", list(vozes_disponiveis.keys()))
+    voice_id = vozes_disponiveis[voz_selecionada]
+    
+    anunciar_capitulos = st.checkbox("Anunciar títulos de Capítulos e Partes", value=True)
+    
+    st.subheader("📦 Organização de Ficheiros")
+    chars_por_parte = st.slider(
+        "Caracteres aproximados por Parte",
+        min_value=3000,
+        max_value=20000,
+        value=8000,
+        step=1000
+    )
 
-1. Voz recomendada: pt-PT-DuarteNeural (masculina) ou pt-PT-RaquelNeural (feminina)
-2. Velocidade padrão: -6% (mais lenta que o normal)
-3. Tom: ligeiramente mais grave para narração íntima
+# --- MEMÓRIA DA SESSÃO ---
+if "arquivos_partes" not in st.session_state:
+    st.session_state.arquivos_partes = []
+if "livro_nome" not in st.session_state:
+    st.session_state.livro_nome = ""
+if "segmentos_cache" not in st.session_state:
+    st.session_state.segmentos_cache = None
 
-{'='*60}
-ESTRUTURA DAS PARTES
-{'='*60}
-"""
+# --- INTERFACE PRINCIPAL ---
+uploaded_file = st.file_uploader("Carrega o guião do audiolivro (.txt)", type=["txt"])
 
-    for i, parte in enumerate(partes, 1):
-        falas = [s for s in parte if s['tipo'] == 'fala']
-        pausas = [s for s in parte if s['tipo'] == 'pausa']
-        chars = sum(len(s['texto']) for s in falas)
-        primeira = falas[0]['texto'][:80] if falas else "(sem fala)"
+if uploaded_file is not None:
+    file_bytes = uploaded_file.read()
+    nome_base = uploaded_file.name.rsplit(".", 1)[0]
+    
+    if st.session_state.livro_nome != uploaded_file.name:
+        st.session_state.livro_nome = uploaded_file.name
+        st.session_state.arquivos_partes = []
+        texto_bruto = file_bytes.decode("utf-8", errors="ignore")
+        st.session_state.segmentos_cache = analisar_guiao_completo(texto_bruto, anunciar_capitulos)
 
-        relatorio += f"""
-Parte {i:02d}:
-  - {len(falas)} blocos de fala, {len(pausas)} pausas
-  - {chars:,} caracteres (~{chars/900:.0f} minutos)
-  - Início: "{primeira}..."
-"""
+    segmentos = st.session_state.segmentos_cache
+    partes = agrupar_em_partes(segmentos, chars_por_parte)
+    
+    total_partes = len(partes)
+    total_falas = sum(1 for s in segmentos if s['tipo'] == 'fala')
+    total_pausas = sum(1 for s in segmentos if s['tipo'] == 'pausa')
+    total_chars = sum(len(s['texto']) for s in segmentos if s['tipo'] == 'fala')
 
-    return relatorio
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Caracteres", f"{total_chars:,}")
+    col2.metric("Blocos de Fala", f"{total_falas:,}")
+    col3.metric("Pausas", f"{total_pausas:,}")
+    col4.metric("Total Partes", total_partes)
 
+    with st.expander("🔍 Inspecionar Análise Cénica (Excertos)"):
+        amostra = []
+        for s in segmentos[:20]:
+            if s['tipo'] == 'pausa':
+                amostra.append(f"⏸️ *[Silêncio: {s['segundos']}s]*")
+            else:
+                amostra.append(f"🎙️ **(Vel: {s['rate']} | Tom: {s['pitch']})**: {s['texto']}")
+        st.markdown("\n\n".join(amostra))
 
-def main():
-    if len(sys.argv) < 2:
-        print("Uso: python estudio_standalone.py <ficheiro_guiao.txt>")
-        print("Exemplo: python estudio_standalone.py o_arquiteto_de_si_mesmo_audiobook_guiao_completo.txt")
-        sys.exit(1)
+    # Botões para exportar dados estruturados (JSON / Relatório)
+    col_dl1, col_dl2 = st.columns(2)
+    with col_dl1:
+        json_data = json.dumps({'segmentos': segmentos, 'partes': partes}, ensure_ascii=False, indent=2)
+        st.download_button(
+            "📥 Descarregar Estrutura JSON",
+            data=json_data,
+            file_name=f"{nome_base}_segmentos.json",
+            mime="application/json",
+            use_container_width=True
+        )
+    with col_dl2:
+        relatorio_txt = f"Relatório de Gravação — {nome_base}\nTotal de Partes: {total_partes}\nTotal de Caracteres: {total_chars:,}"
+        st.download_button(
+            "📄 Descarregar Relatório TXT",
+            data=relatorio_txt,
+            file_name=f"{nome_base}_relatorio.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
 
-    ficheiro_guiao = sys.argv[1]
-    nome_base = Path(ficheiro_guiao).stem
+    st.markdown("---")
+    st.subheader("🎯 Intervalo de Gravação")
+    col_i, col_f = st.columns(2)
+    p_ini = col_i.number_input("Começar na Parte", min_value=1, max_value=total_partes, value=1)
+    p_fim = col_f.number_input("Terminar na Parte", min_value=p_ini, max_value=total_partes, value=min(p_ini, total_partes))
 
-    print(f"📖 A ler guião: {ficheiro_guiao}")
+    if st.button("🚀 Iniciar Síntese de Áudio com Direção Cénica", type="primary", use_container_width=True):
+        st.session_state.arquivos_partes = []
+        indices = list(range(p_ini - 1, p_fim))
+        
+        status = st.empty()
+        prog = st.progress(0)
+        area_tempo_real = st.container()
 
-    with open(ficheiro_guiao, 'r', encoding='utf-8') as f:
-        texto = f.read()
+        for step, idx in enumerate(indices):
+            num_p = idx + 1
+            status.info(f"🎙️ A processar Parte {num_p} de {p_fim}...")
+            
+            audio_mp3 = asyncio.run(gravar_parte_audio(partes[idx], voice_id))
+            resumo_txt = next((b['texto'] for b in partes[idx] if b['tipo'] == 'fala'), "")[:100]
+            nome_arq = f"{nome_base}_Parte_{num_p:02d}.mp3"
+            
+            st.session_state.arquivos_partes.append((nome_arq, audio_mp3, resumo_txt))
+            
+            with area_tempo_real:
+                with st.container(border=True):
+                    st.markdown(f"✅ **{nome_arq}**")
+                    st.caption(f"\"{resumo_txt}...\"")
+                    st.audio(audio_mp3, format="audio/mp3")
+                    st.download_button(
+                        f"📥 Descarregar {nome_arq}",
+                        data=audio_mp3,
+                        file_name=nome_arq,
+                        mime="audio/mp3",
+                        key=f"dl_rt_{num_p}"
+                    )
+            
+            prog.progress((step + 1) / len(indices))
 
-    print("🔍 A analisar guião...")
-    segmentos = analisar_guiao(texto, anunciar_cap=True)
+        status.empty()
+        prog.empty()
+        st.success("🎉 Síntese concluída com sucesso!")
 
-    print("📦 A agrupar em partes...")
-    partes = agrupar_em_partes(segmentos, max_chars=8000)
-
-    # Guardar segmentos em JSON
-    json_path = f"{nome_base}_segmentos.json"
-    with open(json_path, 'w', encoding='utf-8') as f:
-        json.dump({
-            'segmentos': segmentos,
-            'partes': partes,
-            'total_partes': len(partes),
-            'total_falas': sum(1 for s in segmentos if s['tipo'] == 'fala'),
-            'total_pausas': sum(1 for s in segmentos if s['tipo'] == 'pausa'),
-        }, f, ensure_ascii=False, indent=2)
-
-    print(f"✅ Segmentos guardados em: {json_path}")
-
-    # Gerar relatório
-    relatorio = gerar_relatorio(partes, nome_base)
-    relatorio_path = f"{nome_base}_relatorio.txt"
-    with open(relatorio_path, 'w', encoding='utf-8') as f:
-        f.write(relatorio)
-
-    print(f"✅ Relatório guardado em: {relatorio_path}")
-
-    # Mostrar resumo
-    print("\n" + "="*60)
-    print("RESUMO")
-    print("="*60)
-    print(f"Partes: {len(partes)}")
-    print(f"Blocos de fala: {sum(1 for s in segmentos if s['tipo'] == 'fala')}")
-    print(f"Pausas: {sum(1 for s in segmentos if s['tipo'] == 'pausa')}")
-    print(f"Duração estimada: {sum(len(s['texto']) for s in segmentos if s['tipo'] == 'fala') / 9000:.1f} horas")
-    print("="*60)
-
-    print("\n📋 PRÓXIMOS PASSOS:")
-    print("1. Quando tiveres internet, instala: pip install edge-tts streamlit")
-    print("2. Corre a app Streamlit: streamlit run estudio_audiolivros_app.py")
-    print("3. Ou usa o JSON para gerar áudio com outra ferramenta TTS")
-
-
-if __name__ == "__main__":
-    main()
+if len(st.session_state.arquivos_partes) > 1:
+    st.markdown("---")
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for n_m, d_m, _ in st.session_state.arquivos_partes:
+            zf.writestr(n_m, d_m)
+    st.download_button(
+        "📦 Descarregar Todas as Partes em ZIP",
+        data=zip_buf.getvalue(),
+        file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Audiolivro_Completo.zip",
+        mime="application/zip",
+        type="primary",
+        use_container_width=True
+    )
