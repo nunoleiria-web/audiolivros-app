@@ -9,6 +9,13 @@ import zipfile
 # 1. Configuração da página DEVE ser a primeira instrução Streamlit
 st.set_page_config(page_title="Estúdio Profissional de Audiolivros", page_icon="🎧", layout="centered")
 
+# --- NAVEGAÇÃO NA BARRA LATERAL ---
+with st.sidebar:
+    st.header("🌐 Navegação")
+    # Certifica-te de que o ficheiro na pasta pages/ se chama exatamente 'loja.py'
+    st.page_link("pages/loja.py", label="Visitar a Loja (EPUB & Audiolivro)", icon="🛒")
+    st.markdown("---")
+
 st.title("🎧 Estúdio Profissional de Audiolivros")
 
 st.markdown(
@@ -263,7 +270,7 @@ async def gravar_audio_otimizado(segmentos_cap: list[dict], voice: str) -> bytes
 
     return buffer_audio.getvalue()
 
-# --- BARRA LATERAL ---
+# --- BARRA LATERAL (CONFIGURAÇÕES DO ESTÚDIO) ---
 with st.sidebar:
     st.header("🎙️ Direção de Voz")
     vozes_disponiveis = {
