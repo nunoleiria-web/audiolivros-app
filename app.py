@@ -297,4 +297,77 @@ if uploaded_file is not None:
                         audio_final_parte = audio_overlap_bytes + audio_limpo_bytes
                         primeira_frase_mostrar = frases_overlap[0]
                     else:
-                        audio_final
+                        audio_final_parte = audio_limpo_bytes
+                        primeira_frase_mostrar = frases_atuais[0]
+                        
+                    nome_ficheiro_audio = f"{nome_base}_Parte_{num_parte_humana:02d}.{ext_formato}"
+                    lista_partes_temp.append((nome_ficheiro_audio, audio_final_parte, primeira_frase_mostrar, ext_formato))
+            
+            status_container.empty()
+            barra_progresso.empty()
+            
+            if gerar_partes:
+                st.session_state.arquivos_partes = lista_partes_temp
+            if gerar_completo:
+                nome_completo = f"{nome_base}_Audiolivro_Completo.{ext_formato}"
+                st.session_state.audio_completo = (nome_completo, buffer_completo.getvalue(), ext_formato)
+                
+            st.success("🎉 Processamento concluído com sucesso! Podes ouvir e descarregar abaixo.")
+
+# --- MOSTRAR RESULTADOS GUARDADOS NA SESSÃO ---
+if st.session_state.audio_completo or st.session_state.arquivos_partes:
+    st.markdown("---")
+    st.subheader("📥 Áudios Prontos para Ouvir e Descarregar")
+    
+    if st.session_state.audio_completo:
+        nome_comp, bytes_comp, ext_comp = st.session_state.audio_completo
+        mime_tipo = "audio/wav" if ext_comp == "wav" else "audio/mp3"
+        with st.container(border=True):
+            st.markdown(f"### 🏆 Áudio Único ({ext_comp.upper()})")
+            st.audio(bytes_comp, format=mime_tipo)
+            st.download_button(
+                label=f"📥 Descarregar Áudio Completo ({nome_comp})",
+                data=bytes_comp,
+                file_name=nome_comp,
+                mime=mime_tipo,
+                type="primary",
+                use_container_width=True,
+                key="dl_completo_unico"
+            )
+
+    if st.session_state.arquivos_partes:
+        st.markdown("### 📚 Áudios Divididos por Partes")
+        arquivos_para_zip = []
+        
+        for idx, (nome_arq, audio_bytes, primeira_frase, ext_arq) in enumerate(st.session_state.arquivos_partes):
+            arquivos_para_zip.append((nome_arq, audio_bytes))
+            mime_tipo = "audio/wav" if ext_arq == "wav" else "audio/mp3"
+            with st.container(border=True):
+                st.markdown(f"**🎵 {nome_arq}**")
+                st.caption(f"Início: \"{primeira_frase[:100]}...\"")
+                st.audio(audio_bytes, format=mime_tipo)
+                st.download_button(
+                    label=f"📥 Descarregar {nome_arq}",
+                    data=audio_bytes,
+                    file_name=nome_arq,
+                    mime=mime_tipo,
+                    key=f"dl_parte_{idx}"
+                )
+                
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            for nome_arq, dados_arq in arquivos_para_zip:
+                zip_file.writestr(nome_arq, dados_arq)
+            if st.session_state.audio_completo:
+                nome_comp, bytes_comp, _ = st.session_state.audio_completo
+                zip_file.writestr(nome_comp, bytes_comp)
+                
+        st.download_button(
+            label="📦 Descarregar Tudo num Ficheiro ZIP",
+            data=zip_buffer.getvalue(),
+            file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Pacote_Audiolivro.zip",
+            mime="application/zip",
+            type="primary",
+            use_container_width=True,
+            key="dl_zip_total"
+        )
