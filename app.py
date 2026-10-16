@@ -1,5 +1,6 @@
 import streamlit as st
-import fitz  # PyMuPDF (Lê PDF e EPUB nativamente!)
+import fitz  # PyMuPDF
+from bs4 import BeautifulSoup
 import asyncio
 import edge_tts
 import io
@@ -53,17 +54,68 @@ with st.sidebar:
         help="Aplica-se apenas aos ficheiros divididos por partes. O áudio completo nunca repete frases a meio."
     )
 
-# --- FUNÇÕES DE EXTRAÇÃO E DIVISÃO ---
-def extrair_documento(file_bytes: bytes, extensao: str) -> str:
-    """Extrai texto de PDF ou EPUB diretamente em memória usando PyMuPDF."""
-    doc = fitz.open(stream=file_bytes, filetype=extensao)
-    texto = []
-    for pagina in doc:
-        t = pagina.get_text("text").replace("\n", " ").strip()
-        if t:
-            texto.append(t)
-    doc.close()
-    return " ".join(texto)
+# --- FUNÇÃO DE EXTRAÇÃO UNIVERSAL BLINDADA ---
+def extrair_documento_universal(file_bytes: bytes, extensao: str) -> str:
+    """
+    Extrai texto de qualquer PDF, EPUB (mesmo corrompido ou sem índice) ou TXT.
+    """
+    # 1. Tentativa direta via PyMuPDF (com a extensão indicada)
+    try:
+        doc = fitz.open(stream=file_bytes, filetype=extensao)
+        texto = []
+        for pagina in doc:
+            t = pagina.get_text("text").replace("\n", " ").strip()
+            if t:
+                texto.append(t)
+        doc.close()
+        resultado = " ".join(texto).strip()
+        if resultado:
+            return resultado
+    except Exception:
+        pass
+
+    # 2. Tentativa via PyMuPDF como PDF (caso seja um PDF renomeado para .epub)
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        texto = []
+        for pagina in doc:
+            t = pagina.get_text("text").replace("\n", " ").strip()
+            if t:
+                texto.append(t)
+        doc.close()
+        resultado = " ".join(texto).strip()
+        if resultado:
+            return resultado
+    except Exception:
+        pass
+
+    # 3. Extração direta abrindo o EPUB como arquivo ZIP (ignora erros de estrutura/NCX)
+    try:
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as z:
+            textos_html = []
+            # Ordena os ficheiros internos para manter a ordem dos capítulos
+            nomes_ficheiros = sorted(z.namelist())
+            for nome in nomes_ficheiros:
+                if nome.lower().endswith(('.xhtml', '.html', '.htm', '.xml')):
+                    # Ignora ficheiros de índice técnico ou metadados
+                    if 'toc' in nome.lower() or 'metas' in nome.lower() or 'container' in nome.lower():
+                        continue
+                    conteudo = z.read(nome)
+                    soup = BeautifulSoup(conteudo, "html.parser")
+                    # Remove tags de estilo ou script
+                    for tag in soup(["script", "style"]):
+                        tag.decompose()
+                    t = soup.get_text(separator=" ").strip()
+                    if t:
+                        textos_html.append(t)
+            resultado = " ".join(textos_html).strip()
+            if resultado:
+                return resultado
+    except Exception:
+        pass
+
+    # 4. Último recurso: decodificar como texto puro
+    return file_bytes.decode("utf-8", errors="ignore").strip()
 
 def separar_em_frases(texto: str) -> list[str]:
     texto_limpo = re.sub(r'\s+', ' ', texto).strip()
@@ -120,24 +172,23 @@ if uploaded_file is not None:
         st.session_state.arquivos_partes = []
         st.session_state.audio_completo = None
 
-    with st.spinner("A analisar o livro e preparar os blocos..."):
-        if extensao in ["pdf", "epub"]:
-            texto_extraido = extrair_documento(file_bytes, extensao)
-        else:
-            texto_extraido = file_bytes.decode("utf-8", errors="ignore")
-            
+    with st.spinner("A extrair e limpar o texto do livro..."):
+        texto_extraido = extrair_documento_universal(file_bytes, extensao)
         todas_as_frases = separar_em_frases(texto_extraido)
         partes_limpas = dividir_partes_base(todas_as_frases, chars_por_parte)
         
     total_partes = len(partes_limpas)
     
-    if total_partes == 0:
-        st.warning("Não foi possível encontrar texto legível neste ficheiro.")
+    if total_partes == 0 or len(texto_extraido) < 10:
+        st.error("❌ Não foi possível extrair texto deste ficheiro. Verifica se o ficheiro não está protegido por DRM (direitos de autor bloqueados) ou se não é apenas composto por imagens digitalizadas.")
     else:
         col1, col2, col3 = st.columns(3)
         col1.metric("Total de Caracteres", f"{len(texto_extraido):,}")
         col2.metric("Total de Frases", f"{len(todas_as_frases):,}")
         col3.metric("Partes Calculadas", total_partes)
+        
+        with st.expander("🔍 Pré-visualizar Texto Extraído (Primeiros 800 caracteres)"):
+            st.write(texto_extraido[:800] + "...")
         
         st.subheader("🎯 Intervalo a Processar")
         col_inicio, col_fim = st.columns(2)
@@ -168,14 +219,11 @@ if uploaded_file is not None:
                 frases_atuais = partes_limpas[idx_real]
                 texto_limpo_bloco = " ".join(frases_atuais)
                 
-                # 1. Gerar o áudio base da parte (sem repetição)
                 audio_limpo_bytes = asyncio.run(gerar_audio_texto(texto_limpo_bloco, voice_id))
                 
-                # Se precisarmos do áudio completo, junta apenas o áudio limpo (sem repetições)
                 if gerar_completo:
                     buffer_completo.write(audio_limpo_bytes)
                     
-                # Se precisarmos das partes individuais, adiciona o áudio das frases repetidas da parte anterior
                 if gerar_partes:
                     if idx_real > 0 and frases_repetidas > 0:
                         frases_overlap = partes_limpas[idx_real - 1][-frases_repetidas:]
@@ -204,7 +252,6 @@ if st.session_state.audio_completo or st.session_state.arquivos_partes:
     st.markdown("---")
     st.subheader("📥 Os Teus Áudios Prontos")
     
-    # 1. Secção do Áudio Único Completo
     if st.session_state.audio_completo:
         nome_comp, bytes_comp = st.session_state.audio_completo
         with st.container(border=True):
@@ -221,7 +268,6 @@ if st.session_state.audio_completo or st.session_state.arquivos_partes:
                 key="dl_completo_unico"
             )
 
-    # 2. Secção dos Vários Áudios (Por Partes)
     if st.session_state.arquivos_partes:
         st.markdown("### 📚 Áudios Divididos por Partes")
         arquivos_para_zip = []
@@ -240,7 +286,6 @@ if st.session_state.audio_completo or st.session_state.arquivos_partes:
                     key=f"dl_parte_{idx}"
                 )
                 
-        # Botão para descarregar tudo num único ZIP
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
             for nome_mp3, dados_mp3 in arquivos_para_zip:
