@@ -7,16 +7,17 @@ import json
 import zipfile
 from pathlib import Path
 
-st.set_page_config(page_title="Estúdio Profissional de Audiolivros", page_icon="🎧", layout="centered")
+st.set_page_config(page_title="Estúdio de Audiolivros - Por Capítulos", page_icon="🎧", layout="centered")
 
-st.title("🎧 Estúdio Profissional de Audiolivros")
+st.title("🎧 Estúdio de Audiolivros - Por Capítulos")
 st.markdown(
-    "Processamento avançado de guiões com **continuidade entre partes** (o ficheiro seguinte começa na última frase do anterior), "
-    "pausas exatas e vozes em Português de alta qualidade."
+    "Gera **um ficheiro MP3 por capítulo**, com nomes automáticos baseados nos títulos do guião. "
+    "Ideal para publicação em plataformas como Audible, Spotify e Apple Books."
 )
 
-# --- FUNÇÃO DE ANÁLISE DE GUIÃO (PARSER CÉNICO STANDALONE) ---
+# --- FUNÇÃO DE ANÁLISE DE GUIÃO (PARSER CÉNICO) ---
 def analisar_guiao_completo(texto_bruto: str, anunciar_cap: bool = True) -> list[dict]:
+    """Parser do guião para segmentos de áudio com direção de tom"""
     linhas = texto_bruto.split('\n')
     segmentos = []
 
@@ -166,27 +167,83 @@ def analisar_guiao_completo(texto_bruto: str, anunciar_cap: bool = True) -> list
     descarregar_fala()
     return segmentos
 
-def agrupar_em_partes(segmentos: list[dict], max_chars: int = 8000) -> list[list[dict]]:
-    partes = []
-    parte_atual = []
-    chars_atuais = 0
+
+def agrupar_por_capitulos(segmentos: list[dict]) -> list[dict]:
+    """
+    Agrupa segmentos por capítulo.
+    Retorna lista de dicionários com:
+    - 'titulo': nome do capítulo
+    - 'numero': número do capítulo (para ordenação)
+    - 'segmentos': lista de segmentos do capítulo
+    """
+    capitulos = []
+    capitulo_atual = None
+    numero_capitulo = 0
+
+    # Regex para identificar início de capítulo
+    re_capitulo = re.compile(
+        r'^(CAPÍTULO\s+(\d+)[A-Z]?\s*[—\-].+|PARTE\s+[A-ZÀ-Ú]+\s*[—\-].+|EPÍLOGO\s*[—\-].+|O SISTEMA MÍNIMO|NOTAS FINAIS)$',
+        re.IGNORECASE
+    )
 
     for seg in segmentos:
-        if seg['tipo'] == 'fala':
-            tam = len(seg['texto'])
-            if chars_atuais + tam > max_chars and parte_atual:
-                partes.append(parte_atual)
-                parte_atual = [seg]
-                chars_atuais = tam
-            else:
-                parte_atual.append(seg)
-                chars_atuais += tam
-        else:
-            parte_atual.append(seg)
+        # Verificar se é anúncio de capítulo (fala com rate -10% e texto de capítulo)
+        if (seg['tipo'] == 'fala' and 
+            seg.get('rate') == '-10%' and 
+            re.match(r'^(Capítulo|Parte|Epílogo|O sistema mínimo|Notas finais)', seg['texto'], re.IGNORECASE)):
 
-    if parte_atual:
-        partes.append(parte_atual)
-    return partes
+            # Fechar capítulo anterior
+            if capitulo_atual:
+                capitulos.append(capitulo_atual)
+
+            # Extrair número do capítulo
+            match = re.match(r'Capítulo\s+(\d+)', seg['texto'], re.IGNORECASE)
+            if match:
+                numero_capitulo = int(match.group(1))
+            elif 'Epílogo' in seg['texto']:
+                numero_capitulo = 98
+            elif 'Sistema' in seg['texto']:
+                numero_capitulo = 99
+            elif 'Notas' in seg['texto']:
+                numero_capitulo = 100
+            else:
+                numero_capitulo += 1
+
+            # Criar novo capítulo
+            titulo = seg['texto'].replace('.', '').strip()
+            # Limpar para nome de ficheiro
+            titulo_ficheiro = re.sub(r'[^\w\s-]', '', titulo)
+            titulo_ficheiro = re.sub(r'\s+', '_', titulo_ficheiro)
+
+            capitulo_atual = {
+                'titulo': titulo,
+                'numero': numero_capitulo,
+                'nome_ficheiro': f"{numero_capitulo:02d}_{titulo_ficheiro}.mp3",
+                'segmentos': [seg]  # Incluir o anúncio do título
+            }
+        else:
+            # Adicionar ao capítulo atual
+            if capitulo_atual is None:
+                # Antes do primeiro capítulo (abertura)
+                if not capitulos or capitulos[0].get('titulo') != 'Abertura':
+                    capitulo_atual = {
+                        'titulo': 'Abertura',
+                        'numero': 0,
+                        'nome_ficheiro': '00_Abertura.mp3',
+                        'segmentos': []
+                    }
+                else:
+                    capitulo_atual = capitulos[0]
+                    capitulos = capitulos[1:]
+
+            capitulo_atual['segmentos'].append(seg)
+
+    # Adicionar último capítulo
+    if capitulo_atual:
+        capitulos.append(capitulo_atual)
+
+    return capitulos
+
 
 # --- FUNÇÃO DE SILÊNCIO NATIVO ROBUSTA ---
 async def obter_frame_silencio_nativo(voice: str) -> bytes:
@@ -203,11 +260,13 @@ async def obter_frame_silencio_nativo(voice: str) -> bytes:
         pass
     return b'\x00' * 320
 
-async def gravar_parte_audio(blocos_parte: list[dict], voice: str) -> bytes:
+
+async def gravar_capitulo_audio(blocos: list[dict], voice: str) -> bytes:
+    """Grava um capítulo completo com pausas e fala"""
     buffer_final = io.BytesIO()
     silencio_base = None
 
-    for b in blocos_parte:
+    for b in blocos:
         if b['tipo'] == 'pausa':
             if silencio_base is None:
                 silencio_base = await obter_frame_silencio_nativo(voice)
@@ -215,47 +274,46 @@ async def gravar_parte_audio(blocos_parte: list[dict], voice: str) -> bytes:
                 repeticoes = int(b['segundos'] * 18)
                 buffer_final.write(silencio_base * max(1, repeticoes))
         elif b['tipo'] == 'fala':
-            communicate = edge_tts.Communicate(
-                b['texto'], 
-                voice, 
-                rate=b['rate'], 
-                pitch=b['pitch']
-            )
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    buffer_final.write(chunk["data"])
+            try:
+                communicate = edge_tts.Communicate(
+                    b['texto'], 
+                    voice, 
+                    rate=b['rate'], 
+                    pitch=b['pitch']
+                )
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        buffer_final.write(chunk["data"])
+            except Exception as e:
+                st.warning(f"⚠️ Erro ao sintetizar: {e}")
+                continue
 
     return buffer_final.getvalue()
 
-# --- BARRA LATERAL: CONFIGURAÇÕES DE ESTÚDIO ---
+
+# --- BARRA LATERAL: CONFIGURAÇÕES ---
 with st.sidebar:
     st.header("🎙️ Direção de Voz")
-    
+
     vozes_disponiveis = {
         "🇵🇹 Duarte (PT - Masculina / Íntima)": "pt-PT-DuarteNeural",
         "🇵🇹 Raquel (PT - Feminina / Natural)": "pt-PT-RaquelNeural",
         "🇧🇷 Antonio (BR - Masculina / Profunda)": "pt-BR-AntonioNeural",
         "🇧🇷 Francisca (BR - Feminina / Suave)": "pt-BR-FranciscaNeural"
     }
-    
+
     voz_selecionada = st.selectbox("Narrador", list(vozes_disponiveis.keys()))
     voice_id = vozes_disponiveis[voz_selecionada]
-    
-    anunciar_capitulos = st.checkbox("Anunciar títulos de Capítulos e Partes", value=True)
-    fazer_overlap = st.checkbox("Repetir última frase na parte seguinte (Continuidade)", value=True)
-    
-    st.subheader("📦 Organização de Ficheiros")
-    chars_por_parte = st.slider(
-        "Caracteres aproximados por Parte",
-        min_value=3000,
-        max_value=20000,
-        value=8000,
-        step=1000
-    )
+
+    anunciar_capitulos = st.checkbox("Anunciar títulos de Capítulos", value=True)
+    incluir_abertura = st.checkbox("Incluir ficheiro de Abertura", value=True)
+
+    st.subheader("📦 Organização")
+    st.info("Cada capítulo será guardado como um ficheiro MP3 separado.")
 
 # --- MEMÓRIA DA SESSÃO ---
-if "arquivos_partes" not in st.session_state:
-    st.session_state.arquivos_partes = []
+if "capitulos_gerados" not in st.session_state:
+    st.session_state.capitulos_gerados = []
 if "livro_nome" not in st.session_state:
     st.session_state.livro_nome = ""
 if "segmentos_cache" not in st.session_state:
@@ -267,17 +325,21 @@ uploaded_file = st.file_uploader("Carrega o guião do audiolivro (.txt)", type=[
 if uploaded_file is not None:
     file_bytes = uploaded_file.read()
     nome_base = uploaded_file.name.rsplit(".", 1)[0]
-    
+
     if st.session_state.livro_nome != uploaded_file.name:
         st.session_state.livro_nome = uploaded_file.name
-        st.session_state.arquivos_partes = []
+        st.session_state.capitulos_gerados = []
         texto_bruto = file_bytes.decode("utf-8", errors="ignore")
         st.session_state.segmentos_cache = analisar_guiao_completo(texto_bruto, anunciar_capitulos)
 
     segmentos = st.session_state.segmentos_cache
-    partes = agrupar_em_partes(segmentos, chars_por_parte)
-    
-    total_partes = len(partes)
+    capitulos = agrupar_por_capitulos(segmentos)
+
+    # Filtrar abertura se não quiser
+    if not incluir_abertura and capitulos and capitulos[0]['numero'] == 0:
+        capitulos = capitulos[1:]
+
+    total_capitulos = len(capitulos)
     total_falas = sum(1 for s in segmentos if s['tipo'] == 'fala')
     total_pausas = sum(1 for s in segmentos if s['tipo'] == 'pausa')
     total_chars = sum(len(s['texto']) for s in segmentos if s['tipo'] == 'fala')
@@ -286,112 +348,102 @@ if uploaded_file is not None:
     col1.metric("Caracteres", f"{total_chars:,}")
     col2.metric("Blocos de Fala", f"{total_falas:,}")
     col3.metric("Pausas", f"{total_pausas:,}")
-    col4.metric("Total Partes", total_partes)
+    col4.metric("Capítulos", total_capitulos)
 
-    with st.expander("🔍 Inspecionar Análise Cénica (Excertos)"):
-        amostra = []
-        for s in segmentos[:20]:
-            if s['tipo'] == 'pausa':
-                amostra.append(f"⏸️ *[Silêncio: {s['segundos']}s]*")
-            else:
-                amostra.append(f"🎙️ **(Vel: {s['rate']} | Tom: {s['pitch']})**: {s['texto']}")
-        st.markdown("\n\n".join(amostra))
-
-    col_dl1, col_dl2 = st.columns(2)
-    with col_dl1:
-        json_data = json.dumps({'segmentos': segmentos, 'partes': partes}, ensure_ascii=False, indent=2)
-        st.download_button(
-            "📥 Descarregar Estrutura JSON",
-            data=json_data,
-            file_name=f"{nome_base}_segmentos.json",
-            mime="application/json",
-            use_container_width=True
-        )
-    with col_dl2:
-        relatorio_txt = f"Relatório de Gravação — {nome_base}\nTotal de Partes: {total_partes}\nTotal de Caracteres: {total_chars:,}"
-        st.download_button(
-            "📄 Descarregar Relatório TXT",
-            data=relatorio_txt,
-            file_name=f"{nome_base}_relatorio.txt",
-            mime="text/plain",
-            use_container_width=True
-        )
+    # Lista de capítulos encontrados
+    with st.expander("📋 Capítulos Identificados"):
+        for cap in capitulos:
+            num_segs = len(cap['segmentos'])
+            chars = sum(len(s['texto']) for s in cap['segmentos'] if s['tipo'] == 'fala')
+            st.markdown(f"**{cap['nome_ficheiro']}** — {num_segs} segmentos, ~{chars:,} caracteres")
 
     st.markdown("---")
-    st.subheader("🎯 Intervalo de Gravação")
-    col_i, col_f = st.columns(2)
-    p_ini = col_i.number_input("Começar na Parte", min_value=1, max_value=total_partes, value=1)
-    p_fim = col_f.number_input("Terminar na Parte", min_value=p_ini, max_value=total_partes, value=min(p_ini, total_partes))
+    st.subheader("🎯 Seleção de Capítulos")
 
-    if st.button("🚀 Iniciar Síntese de Áudio com Direção Cénica", type="primary", use_container_width=True):
-        st.session_state.arquivos_partes = []
-        indices = list(range(p_ini - 1, p_fim))
-        
+    # Seletor de capítulos
+    opcoes = [f"{cap['numero']:02d} - {cap['titulo']}" for cap in capitulos]
+    capitulos_selecionados = st.multiselect(
+        "Escolhe os capítulos a gerar (vazio = todos)",
+        options=opcoes,
+        default=[]
+    )
+
+    # Converter seleção para índices
+    if capitulos_selecionados:
+        indices = [i for i, cap in enumerate(capitulos) if f"{cap['numero']:02d} - {cap['titulo']}" in capitulos_selecionados]
+    else:
+        indices = list(range(len(capitulos)))
+
+    st.info(f"**{len(indices)}** capítulos selecionados para geração.")
+
+    if st.button("🚀 Iniciar Geração por Capítulos", type="primary", use_container_width=True):
+        st.session_state.capitulos_gerados = []
+
         status = st.empty()
         prog = st.progress(0)
         area_tempo_real = st.container()
 
         for step, idx in enumerate(indices):
-            num_p = idx + 1
-            status.info(f"🎙️ A processar Parte {num_p} de {p_fim}...")
-            
-            # Preparar blocos da parte atual
-            blocos_a_processar = list(partes[idx])
-            
-            # Se for Parte > 1 e o overlap estiver ativo, prepend a última frase da parte anterior
-            if idx > 0 and fazer_overlap:
-                bloco_anterior_fala = None
-                for b in reversed(partes[idx - 1]):
-                    if b['tipo'] == 'fala':
-                        bloco_anterior_fala = b
-                        break
-                if bloco_anterior_fala:
-                    frases = re.split(r'(?<=[.!?])\s+', bloco_anterior_fala['texto'])
-                    if frases and frases[-1].strip():
-                        ultima_frase = frases[-1].strip()
-                        blocos_a_processar.insert(0, {
-                            'tipo': 'fala',
-                            'texto': ultima_frase,
-                            'rate': bloco_anterior_fala.get('rate', '-6%'),
-                            'pitch': bloco_anterior_fala.get('pitch', '-1Hz')
-                        })
+            capitulo = capitulos[idx]
+            status.info(f"🎙️ A gravar Capítulo {capitulo['numero']:02d}: {capitulo['titulo']}...")
 
-            audio_mp3 = asyncio.run(gravar_parte_audio(blocos_a_processar, voice_id))
-            resumo_txt = next((b['texto'] for b in partes[idx] if b['tipo'] == 'fala'), "")[:100]
-            nome_arq = f"{nome_base}_Parte_{num_p:02d}.mp3"
-            
-            st.session_state.arquivos_partes.append((nome_arq, audio_mp3, resumo_txt))
-            
-            with area_tempo_real:
-                with st.container(border=True):
-                    st.markdown(f"✅ **{nome_arq}**")
-                    st.caption(f"\"{resumo_txt}...\"")
-                    st.audio(audio_mp3, format="audio/mp3")
-                    st.download_button(
-                        f"📥 Descarregar {nome_arq}",
-                        data=audio_mp3,
-                        file_name=nome_arq,
-                        mime="audio/mp3",
-                        key=f"dl_rt_{num_p}"
-                    )
-            
+            try:
+                audio_mp3 = asyncio.run(gravar_capitulo_audio(capitulo['segmentos'], voice_id))
+
+                st.session_state.capitulos_gerados.append({
+                    'nome': capitulo['nome_ficheiro'],
+                    'titulo': capitulo['titulo'],
+                    'audio': audio_mp3
+                })
+
+                with area_tempo_real:
+                    with st.container(border=True):
+                        st.markdown(f"✅ **{capitulo['nome_ficheiro']}**")
+                        st.caption(f"{capitulo['titulo']}")
+                        st.audio(audio_mp3, format="audio/mp3")
+                        st.download_button(
+                            f"📥 {capitulo['nome_ficheiro']}",
+                            data=audio_mp3,
+                            file_name=capitulo['nome_ficheiro'],
+                            mime="audio/mp3",
+                            key=f"dl_cap_{capitulo['numero']}"
+                        )
+            except Exception as e:
+                st.error(f"❌ Erro no capítulo {capitulo['numero']}: {e}")
+
             prog.progress((step + 1) / len(indices))
 
         status.empty()
         prog.empty()
-        st.success("🎉 Síntese concluída com sucesso!")
+        st.success(f"🎉 {len(st.session_state.capitulos_gerados)} capítulos gerados com sucesso!")
 
-if len(st.session_state.arquivos_partes) > 1:
+# --- DOWNLOAD EM ZIP ---
+if len(st.session_state.capitulos_gerados) > 0:
     st.markdown("---")
+    st.subheader("📦 Download do Audiolivro Completo")
+
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for n_m, d_m, _ in st.session_state.arquivos_partes:
-            zf.writestr(n_m, d_m)
+        for cap in st.session_state.capitulos_gerados:
+            zf.writestr(cap['nome'], cap['audio'])
+
     st.download_button(
-        "📦 Descarregar Todas as Partes em ZIP",
+        "📦 Descarregar Todos os Capítulos (ZIP)",
         data=zip_buf.getvalue(),
-        file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Audiolivro_Completo.zip",
+        file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Capitulos.zip",
         mime="application/zip",
         type="primary",
         use_container_width=True
     )
+
+    # Estrutura para Audible/ACX
+    with st.expander("📋 Estrutura para Upload (Audible/ACX)"):
+        st.markdown("""
+        **Requisitos ACX:**
+        - Um ficheiro MP3 por capítulo
+        - Nomeação: `01_Capitulo.mp3`, `02_Capitulo.mp3`, etc.
+        - Cada ficheiro: MP3 192kbps, 44.1kHz, -16 LUFS
+        - Mínimo 1 minuto, máximo 2 horas por ficheiro
+
+        **Os teus ficheiros estão prontos para upload!**
+        """)
