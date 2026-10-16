@@ -20,7 +20,7 @@ except Exception:
 st.set_page_config(page_title="Gerador de Audiolivros com IA", page_icon="🎧", layout="centered")
 
 st.title("🎧 Conversor de Livros para Audiolivro (IA Avançada)")
-st.markdown("Converte o teu livro em partes, limpa automaticamente instruções de guião/cenas e carateres especiais, e descarrega o áudio **à medida que vai sendo gerado**.")
+st.markdown("Converte o teu livro em partes, limpa automaticamente instruções de guião e separadores, e usa **vozes em Português**.")
 
 # --- BARRA LATERAL: CONFIGURAÇÕES ---
 with st.sidebar:
@@ -32,13 +32,15 @@ with st.sidebar:
         
     motor_escolhido = st.selectbox("Motor de Voz", motores_disponiveis)
     
+    # Definição correta das vozes consoante o motor escolhido
     if "Kokoro" in motor_escolhido:
         vozes_disponiveis = {
-            "🇺🇸 Heart (IA Premium / Feminina - Natural)": "af_heart",
-            "🇺🇸 Bella (IA / Feminina)": "af_bella",
-            "🇺🇸 Adam (IA / Masculino)": "am_adam"
+            "🇧🇷 Dora (IA / Feminina - PT-BR)": "pf_dora",
+            "🇧🇷 Alex (IA / Masculino - PT-BR)": "pm_alex",
+            "🇧🇷 Santa (IA / Masculino - PT-BR)": "pm_santa",
+            "🇺🇸 Heart (IA Premium / Feminina - Alternativa)": "af_heart"
         }
-        lang_code = 'a'
+        lang_code = 'p'  # Código para português no pipeline do Kokoro
     else:
         vozes_disponiveis = {
             "🇵🇹 Raquel (PT - Natural / Feminina)": "pt-PT-RaquelNeural",
@@ -80,13 +82,7 @@ with st.sidebar:
 
 # --- FUNÇÃO DE LIMPEZA AVANÇADA DE GUIÕES E SEPARADORES ---
 def limpar_instrucoes_guiom(texto: str) -> str:
-    """
-    Remove marcações de guião, cabeçalhos, e sequências de símbolos 
-    como ================== ou ----------- para evitar que sejam lidas.
-    """
-    # 1. Remove blocos entre parênteses rectos [MÚSICA:...], [P: 3s], etc.
     texto_limpo = re.sub(r'\[.*?\]', '', texto)
-    
     linhas = texto_limpo.split('\n')
     linhas_filtradas = []
     
@@ -97,21 +93,14 @@ def limpar_instrucoes_guiom(texto: str) -> str:
     
     for linha in linhas:
         linha_strip = linha.strip()
-        
-        # Ignora linhas compostas apenas por símbolos repetidos (=, -, _, *, etc.)
         if re.match(r'^[=\-_*#]{3,}$', linha_strip):
             continue
-            
-        # Ignora cabeçalhos estruturais conhecidos
         if padroes_ignorar.match(linha_strip):
             continue
-            
         linhas_filtradas.append(linha)
         
-    # Junta tudo e remove eventuais resíduos de múltiplos sinais de igual ou traços isolados no texto
     texto_final = "\n".join(linhas_filtradas)
     texto_final = re.sub(r'[=\-_*#]{3,}', '', texto_final)
-    
     return texto_final
 
 # --- FUNÇÃO DE EXTRAÇÃO UNIVERSAL BLINDADA ---
@@ -379,6 +368,6 @@ if st.session_state.audio_completo or st.session_state.arquivos_partes:
             file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Pacote_Audiolivro.zip",
             mime="application/zip",
             type="primary",
-            use_container_width=True,
+515            use_container_width=True,
             key="dl_zip_total"
         )
