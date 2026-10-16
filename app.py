@@ -6,12 +6,12 @@ import re
 import json
 import zipfile
 
-st.set_page_config(page_title="Estúdio Profissional de Audiolivros ACX", page_icon="🎧", layout="centered")
+st.set_page_config(page_title="Estúdio Profissional de Audiolivros", page_icon="🎧", layout="centered")
 
 st.title("🎧 Estúdio Profissional de Audiolivros")
 st.markdown(
-    "Processamento avançado de guiões com **ritmo natural optimizado (-10%)**, "
-    "detecção robusta de capítulos e pausas calibradas (Sem dependências externas de FFmpeg)."
+    "Processamento avançado de guiões com **captura otimizada por stream do edge-tts**, "
+    "ritmo natural (-10%) e organização rigorosa por capítulos."
 )
 
 # --- FUNÇÃO PARA LIMPAR NOMES DE FICHEIROS ---
@@ -21,7 +21,7 @@ def limpar_nome_ficheiro(texto: str) -> str:
     texto = re.sub(r'[^\w_]', '', texto)
     return texto.lower()
 
-# --- PARSER CÉNICO ROBUSTO POR CAPÍTULOS ---
+# --- PARSER CÉNICO POR CAPÍTULOS ---
 def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) -> list[dict]:
     linhas = texto_bruto.split('\n')
     capitulos = []
@@ -30,7 +30,7 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
     parte_pendente = None
 
     rate_atual = "-10%"
-    pitch_atual = "-2Hz"
+    pitch_atual = "-1Hz"
     buffer_fala = []
 
     em_cabecalho_inicial = True
@@ -236,8 +236,9 @@ async def obter_frame_silencio_nativo(voice: str) -> bytes:
         pass
     return b'\x00' * 320
 
-async def gravar_audio_capitulo(segmentos_cap: list[dict], voice: str) -> bytes:
-    buffer_final = io.BytesIO()
+# --- MOTOR DE GRAVAÇÃO OTIMIZADO (PADRÃO RECOMENDADO) ---
+async def gravar_audio_otimizado(segmentos_cap: list[dict], voice: str) -> bytes:
+    buffer_audio = io.BytesIO()
     silencio_base = None
 
     for b in segmentos_cap:
@@ -246,19 +247,17 @@ async def gravar_audio_capitulo(segmentos_cap: list[dict], voice: str) -> bytes:
                 silencio_base = await obter_frame_silencio_nativo(voice)
             if silencio_base:
                 repeticoes = int(b['segundos'] * 18)
-                buffer_final.write(silencio_base * max(1, repeticoes))
+                buffer_audio.write(silencio_base * max(1, repeticoes))
         elif b['tipo'] == 'fala':
             communicate = edge_tts.Communicate(
-                b['texto'],
-                voice,
-                rate=b['rate'],
-                pitch=b['pitch']
+                b['texto'], voice, rate=b['rate'], 
+                pitch=b['pitch'], volume="+0%"
             )
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
-                    buffer_final.write(chunk["data"])
+                    buffer_audio.write(chunk["data"])
 
-    return buffer_final.getvalue()
+    return buffer_audio.getvalue()
 
 # --- BARRA LATERAL ---
 with st.sidebar:
@@ -317,7 +316,7 @@ if uploaded_file is not None:
     c_ini = col_i.number_input("Começar no Capítulo", min_value=1, max_value=total_caps, value=1)
     c_fim = col_f.number_input("Terminar no Capítulo", min_value=c_ini, max_value=total_caps, value=total_caps)
 
-    if st.button("🚀 Gerar Audiolivro Profissional", type="primary", use_container_width=True):
+    if st.button("🚀 Gerar Audiolivro", type="primary", use_container_width=True):
         st.session_state.arquivos_gerados = []
         indices = list(range(c_ini - 1, c_fim))
 
@@ -327,7 +326,7 @@ if uploaded_file is not None:
 
         for step, idx in enumerate(indices):
             cap = capitulos[idx]
-            status.info(f"🎙️ A gravar {cap['nome_mp3']} ({step + 1} de {len(indices)})...")
+            status.info(f"🎙️ A processar {cap['nome_mp3']} [{step + 1}/{len(indices)}]...")
 
             segs_a_gravar = list(cap['segmentos'])
 
@@ -345,7 +344,7 @@ if uploaded_file is not None:
                         })
                         segs_a_gravar.insert(1, {'tipo': 'pausa', 'segundos': 1.0})
 
-            audio_mp3 = asyncio.run(gravar_audio_capitulo(segs_a_gravar, voice_id))
+            audio_mp3 = asyncio.run(gravar_audio_otimizado(segs_a_gravar, voice_id))
             resumo_txt = next((s['texto'] for s in cap['segmentos'] if s['tipo'] == 'fala'), "")[:100]
 
             st.session_state.arquivos_gerados.append((cap['nome_mp3'], audio_mp3, resumo_txt))
@@ -367,7 +366,7 @@ if uploaded_file is not None:
 
         status.empty()
         prog.empty()
-        st.success("🎉 Todos os capítulos selecionados foram gravados com sucesso!")
+        st.success("🎉 Todos os capítulos selecionados foram gerados com sucesso!")
 
 if len(st.session_state.arquivos_gerados) > 1:
     st.markdown("---")
