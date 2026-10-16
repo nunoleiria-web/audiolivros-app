@@ -5,16 +5,13 @@ import io
 import re
 import json
 import zipfile
-import os
-import subprocess
-import tempfile
 
 st.set_page_config(page_title="Estúdio Profissional de Audiolivros ACX", page_icon="🎧", layout="centered")
 
-st.title("🎧 Estúdio Profissional de Audiolivros — Padrão ACX (192 kbps, Estéreo)")
+st.title("🎧 Estúdio Profissional de Audiolivros")
 st.markdown(
-    "Processamento avançado com **conversão interna limpa por FFmpeg** para garantir "
-    "192 kbps, 44.1 kHz Estéreo, ritmo natural (-10%) e total conformidade com a ACX."
+    "Processamento avançado de guiões com **ritmo natural optimizado (-10%)**, "
+    "detecção robusta de capítulos e pausas calibradas (Sem dependências externas de FFmpeg)."
 )
 
 # --- FUNÇÃO PARA LIMPAR NOMES DE FICHEIROS ---
@@ -239,9 +236,8 @@ async def obter_frame_silencio_nativo(voice: str) -> bytes:
         pass
     return b'\x00' * 320
 
-# --- MOTOR DE GRAVAÇÃO E CONVERSÃO ACX ---
-async def gravar_e_converter_acx(segmentos_cap: list[dict], voice: str) -> bytes:
-    buffer_audio = io.BytesIO()
+async def gravar_audio_capitulo(segmentos_cap: list[dict], voice: str) -> bytes:
+    buffer_final = io.BytesIO()
     silencio_base = None
 
     for b in segmentos_cap:
@@ -250,48 +246,19 @@ async def gravar_e_converter_acx(segmentos_cap: list[dict], voice: str) -> bytes
                 silencio_base = await obter_frame_silencio_nativo(voice)
             if silencio_base:
                 repeticoes = int(b['segundos'] * 18)
-                buffer_audio.write(silencio_base * max(1, repeticoes))
+                buffer_final.write(silencio_base * max(1, repeticoes))
         elif b['tipo'] == 'fala':
             communicate = edge_tts.Communicate(
-                b['texto'], voice, rate=b['rate'], 
-                pitch=b['pitch'], volume="+0%"
+                b['texto'],
+                voice,
+                rate=b['rate'],
+                pitch=b['pitch']
             )
             async for chunk in communicate.stream():
                 if chunk["type"] == "audio":
-                    buffer_audio.write(chunk["data"])
+                    buffer_final.write(chunk["data"])
 
-    raw_audio = buffer_audio.getvalue()
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = os.path.join(tmpdir, "input.mp3")
-        output_path = os.path.join(tmpdir, "output.mp3")
-        
-        with open(input_path, "wb") as f:
-            f.write(raw_audio)
-        
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", input_path,
-            "-b:a", "192k",
-            "-ar", "44100",
-            "-ac", "2",
-            "-codec:a", "libmp3lame",
-            output_path
-        ]
-        
-        try:
-            subprocess.run(cmd, capture_output=True, check=True)
-            
-            if os.path.exists(output_path):
-                with open(output_path, "rb") as f:
-                    return f.read()
-            else:
-                st.error("Ficheiro convertido não encontrado")
-                return raw_audio
-                
-        except subprocess.CalledProcessError as e:
-            st.error(f"Erro FFmpeg: {e.stderr.decode()}")
-            return raw_audio
+    return buffer_final.getvalue()
 
 # --- BARRA LATERAL ---
 with st.sidebar:
@@ -350,7 +317,7 @@ if uploaded_file is not None:
     c_ini = col_i.number_input("Começar no Capítulo", min_value=1, max_value=total_caps, value=1)
     c_fim = col_f.number_input("Terminar no Capítulo", min_value=c_ini, max_value=total_caps, value=total_caps)
 
-    if st.button("🚀 Gerar Audiolivro ACX Certificado (192kbps / Estéreo)", type="primary", use_container_width=True):
+    if st.button("🚀 Gerar Audiolivro Profissional", type="primary", use_container_width=True):
         st.session_state.arquivos_gerados = []
         indices = list(range(c_ini - 1, c_fim))
 
@@ -360,7 +327,7 @@ if uploaded_file is not None:
 
         for step, idx in enumerate(indices):
             cap = capitulos[idx]
-            status.info(f"🎙️ A converter {cap['nome_mp3']} para o padrão ACX [{step + 1}/{len(indices)}]...")
+            status.info(f"🎙️ A gravar {cap['nome_mp3']} ({step + 1} de {len(indices)})...")
 
             segs_a_gravar = list(cap['segmentos'])
 
@@ -378,14 +345,14 @@ if uploaded_file is not None:
                         })
                         segs_a_gravar.insert(1, {'tipo': 'pausa', 'segundos': 1.0})
 
-            audio_mp3 = asyncio.run(gravar_e_converter_acx(segs_a_gravar, voice_id))
+            audio_mp3 = asyncio.run(gravar_audio_capitulo(segs_a_gravar, voice_id))
             resumo_txt = next((s['texto'] for s in cap['segmentos'] if s['tipo'] == 'fala'), "")[:100]
 
             st.session_state.arquivos_gerados.append((cap['nome_mp3'], audio_mp3, resumo_txt))
 
             with area_tempo_real:
                 with st.container(border=True):
-                    st.markdown(f"✅ **{cap['nome_mp3']}** *(Certificado ACX: 192kbps / 44.1kHz Estéreo)*")
+                    st.markdown(f"✅ **{cap['nome_mp3']}** *(~{cap['caracteres']:,} caracteres)*")
                     st.caption(f"\"{resumo_txt}...\"")
                     st.audio(audio_mp3, format="audio/mp3")
                     st.download_button(
@@ -400,7 +367,7 @@ if uploaded_file is not None:
 
         status.empty()
         prog.empty()
-        st.success("🎉 Todos os capítulos foram gerados e convertidos com sucesso para o padrão ACX profissional!")
+        st.success("🎉 Todos os capítulos selecionados foram gravados com sucesso!")
 
 if len(st.session_state.arquivos_gerados) > 1:
     st.markdown("---")
@@ -409,9 +376,9 @@ if len(st.session_state.arquivos_gerados) > 1:
         for n_m, d_m, _ in st.session_state.arquivos_gerados:
             zf.writestr(n_m, d_m)
     st.download_button(
-        "📦 Descarregar Audiolivro Completo em ZIP (Padrão ACX)",
+        "📦 Descarregar Audiolivro Completo em ZIP",
         data=zip_buf.getvalue(),
-        file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_ACX_192kbps_Esterio.zip",
+        file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Capítulos_Completos.zip",
         mime="application/zip",
         type="primary",
         use_container_width=True
