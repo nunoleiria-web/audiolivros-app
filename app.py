@@ -18,7 +18,6 @@ st.markdown("Converte o teu livro completo em áudio usando as vozes neurais gra
 with st.sidebar:
     st.header("⚙️ Configurações de Voz")
     
-    # Vozes em Português disponíveis no Edge TTS
     vozes_disponiveis = {
         "🇵🇹 Raquel (PT - Natural / Feminina)": "pt-PT-RaquelNeural",
         "🇵🇹 Duarte (PT - Natural / Masculina)": "pt-PT-DuarteNeural",
@@ -103,6 +102,12 @@ async def gerar_audio_texto(texto: str, voice: str) -> bytes:
             mp3_buffer.write(chunk["data"])
     return mp3_buffer.getvalue()
 
+# --- INICIALIZAR MEMÓRIA DA SESSÃO ---
+if "arquivos_gerados" not in st.session_state:
+    st.session_state.arquivos_gerados = []
+if "livro_nome" not in st.session_state:
+    st.session_state.livro_nome = ""
+
 # --- INTERFACE PRINCIPAL ---
 uploaded_file = st.file_uploader("Escolhe o ficheiro do livro", type=["pdf", "epub", "txt"])
 
@@ -111,6 +116,11 @@ if uploaded_file is not None:
     extensao = uploaded_file.name.split(".")[-1].lower()
     nome_base = uploaded_file.name.rsplit(".", 1)[0]
     
+    # Se carregou um livro novo, limpa os áudios antigos da sessão
+    if st.session_state.livro_nome != uploaded_file.name:
+        st.session_state.livro_nome = uploaded_file.name
+        st.session_state.arquivos_gerados = []
+
     with st.spinner("A analisar o livro e preparar as partes..."):
         if extensao == "pdf":
             texto_extraido = extrair_pdf(file_bytes)
@@ -135,11 +145,12 @@ if uploaded_file is not None:
     parte_final = col_fim.number_input("Terminar na Parte", min_value=parte_inicial, max_value=total_partes, value=total_partes)
     
     if st.button(f"🚀 Gerar Áudios Gratuitos (Parte {parte_inicial} até {parte_final})", type="primary", use_container_width=True):
-        arquivos_gerados = []
+        st.session_state.arquivos_gerados = []  # Limpa lista anterior
         progresso_geral = st.progress(0, text="A iniciar conversão gratuita...")
         partes_selecionadas = partes_do_livro[parte_inicial - 1 : parte_final]
         total_selecionadas = len(partes_selecionadas)
         
+        lista_temporaria = []
         for idx_p, frases_parte in enumerate(partes_selecionadas):
             num_parte_real = parte_inicial + idx_p
             progresso_geral.progress(
@@ -148,39 +159,48 @@ if uploaded_file is not None:
             )
             
             texto_bloco = " ".join(frases_parte)
-            
-            # Executar o gerador assíncrono do edge-tts
             audio_bytes = asyncio.run(gerar_audio_texto(texto_bloco, voice_id))
             
             nome_ficheiro_mp3 = f"{nome_base}_Parte_{num_parte_real:02d}.mp3"
-            arquivos_gerados.append((nome_ficheiro_mp3, audio_bytes))
+            lista_temporaria.append((nome_ficheiro_mp3, audio_bytes, frases_parte[0]))
             
-            with st.container(border=True):
-                st.markdown(f"### 🎵 Parte {num_parte_real} de {total_partes}")
-                st.caption(f"Começa com: \"{frases_parte[0][:120]}...\"")
-                st.audio(audio_bytes, format="audio/mp3")
-                st.download_button(
-                    label=f"📥 Descarregar Parte {num_parte_real:02d} (MP3)",
-                    data=audio_bytes,
-                    file_name=nome_ficheiro_mp3,
-                    mime="audio/mp3",
-                    key=f"dl_{num_parte_real}"
-                )
-        
+        st.session_state.arquivos_gerados = lista_temporaria
         progresso_geral.progress(1.0, text="✅ Geração concluída!")
-        st.success("🎉 Todos os áudios gratuitos foram gerados com sucesso!")
-        
-        if len(arquivos_gerados) > 1:
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                for nome_mp3, dados_mp3 in arquivos_gerados:
-                    zip_file.writestr(nome_mp3, dados_mp3)
-                    
+        st.success("🎉 Todos os áudios foram gerados e guardados em segurança na sessão!")
+
+# --- MOSTRAR OS ÁUDIOS GUARDADOS NA SESSÃO (Não desaparecem ao descarregar) ---
+if st.session_state.arquivos_gerados:
+    st.markdown("---")
+    st.subheader("📥 Os Teus Áudios Prontos para Ouvir e Descarregar")
+    
+    arquivos_para_zip = []
+    for idx, (nome_mp3, audio_bytes, primeira_frase) in enumerate(st.session_state.arquivos_gerados):
+        arquivos_para_zip.append((nome_mp3, audio_bytes))
+        with st.container(border=True):
+            st.markdown(f"### 🎵 {nome_mp3}")
+            st.caption(f"Começa com: \"{primeira_frase[:120]}...\"")
+            st.audio(audio_bytes, format="audio/mp3")
             st.download_button(
-                label="📦 Descarregar TODOS os Áudios num Ficheiro ZIP",
-                data=zip_buffer.getvalue(),
-                file_name=f"{nome_base}_Audiolivro_Partes_{parte_inicial}_a_{parte_final}.zip",
-                mime="application/zip",
-                type="primary",
-                use_container_width=True
+                label=f"📥 Descarregar {nome_mp3}",
+                data=audio_bytes,
+                file_name=nome_mp3,
+                mime="audio/mp3",
+                key=f"dl_{idx}_{nome_mp3}"
             )
+            
+    # Botão ZIP geral
+    if len(arquivos_para_zip) > 1:
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            for nome_mp3, dados_mp3 in arquivos_para_zip:
+                zip_file.writestr(nome_mp3, dados_mp3)
+                
+        st.markdown("---")
+        st.download_button(
+            label="📦 Descarregar TODOS os Áudios num Ficheiro ZIP",
+            data=zip_buffer.getvalue(),
+            file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Audiolivro_Completo.zip",
+            mime="application/zip",
+            type="primary",
+            use_container_width=True
+        )
