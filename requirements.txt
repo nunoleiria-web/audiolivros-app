@@ -2,3 +2,6 @@ streamlit
 pymupdf
 beautifulsoup4
 edge-tts
+kokoro>=0.9.4
+soundfile
+torch
