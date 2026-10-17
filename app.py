@@ -250,7 +250,14 @@ if uploaded_file is not None:
             status.info(f"🎙️ A processar {cap['nome_mp3']} [{step + 1}/{total_caps}]...")
 
             # Converte os segmentos para o formato esperado pelo construtor
-            segs_formatados = [(s['tipo'], s['texto']) for s in cap['segmentos']]
+           segs_formatados = []
+for s in cap['segmentos']:
+    if s.get('tipo') == 'fala' and 'texto' in s:
+        segs_formatados.append(('fala', s['texto']))
+    elif s.get('tipo') == 'pausa' and 'segundos' in s:
+        segs_formatados.append(('pausa', s['segundos']))
+    else:
+        st.warning(f"Segmento inválido ignorado: {s}")
             
             audio_gerado = construir_audio_sessao(segs_formatados, modelo, sr, modo_teste)
             
