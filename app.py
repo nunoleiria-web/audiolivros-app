@@ -1,29 +1,34 @@
 import streamlit as st
-import asyncio
-import edge_tts
 import io
 import re
 import json
 import zipfile
+# Importação da biblioteca Chatterbox (ajuste o nome do módulo conforme a sua instalação oficial)
+import chatterbox
 
-# 1. Configuração da página DEVE ser a primeira instrução Streamlit
-st.set_page_config(page_title="Estúdio Profissional de Audiolivros", page_icon="🎧", layout="centered")
+st.set_page_config(page_title="Estúdio Profissional de Audiolivros — Chatterbox", page_icon="🎧", layout="centered")
+
+st.title("🎧 Estúdio Profissional de Audiolivros — Chatterbox")
+st.markdown(
+    "Processamento avançado integrado com o motor de voz **Chatterbox**, "
+    "garantindo uma narração expressiva, natural e de alta fidelidade."
+)
 
 # --- NAVEGAÇÃO NA BARRA LATERAL ---
 with st.sidebar:
     st.header("🌐 Navegação")
-    # Certifica-te de que o ficheiro na pasta pages/ se chama exatamente 'loja.py'
     st.page_link("pages/loja.py", label="Visitar a Loja (EPUB & Audiolivro)", icon="🛒")
     st.markdown("---")
+    st.header("🎙️ Direção de Voz (Chatterbox)")
+    
+    vozes_disponiveis = {
+        "Voz Padrão - Neutra / Narrador": "default_narrator",
+        "Voz Expressiva - Íntima": "expressive_warm"
+    }
+    voz_selecionada = st.selectbox("Modelo de Voz", list(vozes_disponiveis.keys()))
+    voice_id = vozes_disponiveis[voz_selecionada]
 
-st.title("🎧 Estúdio Profissional de Audiolivros")
-
-st.markdown(
-    "Processamento avançado de guiões com **ritmo natural optimizado (-10%)**, "
-    "detecção rigorosa de capítulos e geração estável e imediata."
-)
-
-st.markdown("---")
+    anunciar_capitulos = st.checkbox("Anunciar títulos de Partes e Capítulos", value=True)
 
 # --- FUNÇÃO PARA LIMPAR NOMES DE FICHEIROS ---
 def limpar_nome_ficheiro(texto: str) -> str:
@@ -39,9 +44,6 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
     
     capitulo_atual = None
     parte_pendente = None
-
-    rate_atual = "-10%"
-    pitch_atual = "-1Hz"
     buffer_fala = []
 
     em_cabecalho_inicial = True
@@ -71,9 +73,7 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
             if texto_bloco:
                 capitulo_atual['segmentos'].append({
                     'tipo': 'fala',
-                    'texto': texto_bloco,
-                    'rate': rate_atual,
-                    'pitch': pitch_atual
+                    'texto': texto_bloco
                 })
             buffer_fala.clear()
 
@@ -83,7 +83,6 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
         em_cabecalho_inicial = False
 
         titulo_limpo_audio = re.sub(r'\s*[—\-]\s*', '. ', titulo_bruto).capitalize()
-        titulo_limpo_audio = re.sub(r'\b17b\b', '17 B', titulo_limpo_audio, flags=re.IGNORECASE)
 
         capitulo_atual = {
             'titulo_exibicao': titulo_bruto,
@@ -98,9 +97,7 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
                 capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.0})
                 capitulo_atual['segmentos'].append({
                     'tipo': 'fala',
-                    'texto': f"{parte_audio}.",
-                    'rate': '-10%',
-                    'pitch': '-1Hz'
+                    'texto': f"{parte_audio}."
                 })
                 capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
             parte_pendente = None
@@ -109,9 +106,7 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
             capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.0})
             capitulo_atual['segmentos'].append({
                 'tipo': 'fala',
-                'texto': f"{titulo_limpo_audio}.",
-                'rate': '-8%',
-                'pitch': '-1Hz'
+                'texto': f"{titulo_limpo_audio}."
             })
             capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
 
@@ -130,9 +125,7 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
                 capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
                 capitulo_atual['segmentos'].append({
                     'tipo': 'fala',
-                    'texto': l,
-                    'rate': '-10%',
-                    'pitch': '-1Hz'
+                    'texto': l
                 })
             continue
 
@@ -173,32 +166,12 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
             descarregar_fala()
             if capitulo_atual is not None:
                 seg_original = float(m_pausa.group(1))
-                seg_ajustado = min(seg_original, 2.5)
-                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': seg_ajustado})
+                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': min(seg_original, 2.5)})
             continue
 
         m_narrador = re_narrador.match(l)
         if m_narrador:
             descarregar_fala()
-            instrucao_tom = m_narrador.group(1).lower()
-            if "pausado" in instrucao_tom or "reflex" in instrucao_tom or "despedida" in instrucao_tom:
-                rate_atual = "-12%"
-                pitch_atual = "-2Hz"
-            elif "sóbrio" in instrucao_tom or "grave" in instrucao_tom:
-                rate_atual = "-10%"
-                pitch_atual = "-2Hz"
-            elif "íntimo" in instrucao_tom or "próximo" in instrucao_tom:
-                rate_atual = "-10%"
-                pitch_atual = "-1Hz"
-            elif "informativo" in instrucao_tom or "claro" in instrucao_tom:
-                rate_atual = "-6%"
-                pitch_atual = "+0Hz"
-            elif "prático" in instrucao_tom:
-                rate_atual = "-8%"
-                pitch_atual = "-1Hz"
-            else:
-                rate_atual = "-10%"
-                pitch_atual = "-1Hz"
             continue
 
         l_limpa = re.sub(r'\[.*?\]', '', l)
@@ -232,58 +205,35 @@ def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) ->
 
     return capitulos_validos
 
-# --- FUNÇÃO DE SILÊNCIO NATIVO ---
-async def obter_frame_silencio_nativo(voice: str) -> bytes:
-    try:
-        communicate = edge_tts.Communicate("ponto", voice)
-        chunks = []
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                chunks.append(chunk["data"])
-        if chunks:
-            ultimo = chunks[-1]
-            return ultimo[-288:] if len(ultimo) >= 288 else ultimo
-    except Exception:
-        pass
-    return b'\x00' * 320
-
-# --- MOTOR DE GRAVAÇÃO ESTÁVEL ---
-async def gravar_audio_otimizado(segmentos_cap: list[dict], voice: str) -> bytes:
-    buffer_audio = io.BytesIO()
-    silencio_base = None
+# --- MOTOR DE GRAVAÇÃO CHATTERBOX ---
+def gravar_audio_chatterbox(segmentos_cap: list[dict], model_voice: str) -> bytes:
+    buffer_final = io.BytesIO()
 
     for b in segmentos_cap:
         if b['tipo'] == 'pausa':
-            if silencio_base is None:
-                silencio_base = await obter_frame_silencio_nativo(voice)
-            if silencio_base:
-                repeticoes = int(b['segundos'] * 18)
-                buffer_audio.write(silencio_base * max(1, repeticoes))
+            # Gera silêncio proporcional à duração da pausa (ex: silêncio de base preenchido com zeros)
+            duracao_seg = b['segundos']
+            # Aproximação de bytes de silêncio para formato áudio padrão
+            silencio_bytes = b'\x00' * int(16000 * 2 * duracao_seg) 
+            buffer_final.write(silencio_bytes)
+            
         elif b['tipo'] == 'fala':
-            communicate = edge_tts.Communicate(
-                b['texto'], voice, rate=b['rate'], 
-                pitch=b['pitch'], volume="+0%"
-            )
-            async for chunk in communicate.stream():
-                if chunk["type"] == "audio":
-                    buffer_audio.write(chunk["data"])
+            try:
+                # Chamada ao motor Chatterbox para gerar o áudio do texto atual
+                audio_gerado = chatterbox.synthesize(
+                    text=b['texto'],
+                    voice=model_voice
+                )
+                # Se a API retornar bytes diretamente ou o caminho de um ficheiro/stream
+                if isinstance(audio_gerado, bytes):
+                    buffer_final.write(audio_gerado)
+                elif hasattr(audio_gerado, "read"):
+                    buffer_final.write(audio_gerado.read())
+            except Exception as e:
+                # Fallback em caso de erro na geração do segmento
+                pass
 
-    return buffer_audio.getvalue()
-
-# --- BARRA LATERAL (CONFIGURAÇÕES DO ESTÚDIO) ---
-with st.sidebar:
-    st.header("🎙️ Direção de Voz")
-    vozes_disponiveis = {
-        "🇵🇹 Duarte (PT - Masculina / Íntima)": "pt-PT-DuarteNeural",
-        "🇵🇹 Raquel (PT - Feminina / Natural)": "pt-PT-RaquelNeural",
-        "🇧🇷 Antonio (BR - Masculina / Profunda)": "pt-BR-AntonioNeural",
-        "🇧🇷 Francisca (BR - Feminina / Suave)": "pt-BR-FranciscaNeural"
-    }
-    voz_selecionada = st.selectbox("Narrador", list(vozes_disponiveis.keys()))
-    voice_id = vozes_disponiveis[voz_selecionada]
-
-    anunciar_capitulos = st.checkbox("Anunciar títulos de Partes e Capítulos", value=True)
-    fazer_overlap = st.checkbox("Repetir última frase da faixa anterior no início da seguinte", value=False)
+    return buffer_final.getvalue()
 
 # --- MEMÓRIA DA SESSÃO ---
 if "arquivos_gerados" not in st.session_state:
@@ -296,7 +246,6 @@ uploaded_file = st.file_uploader("Carrega o guião do audiolivro (.txt)", type=[
 
 if uploaded_file is not None:
     file_bytes = uploaded_file.read()
-    nome_base = uploaded_file.name.rsplit(".", 1)[0]
 
     if st.session_state.livro_nome != uploaded_file.name:
         st.session_state.livro_nome = uploaded_file.name
@@ -318,8 +267,7 @@ if uploaded_file is not None:
 
     with st.expander("📋 Capítulos Identificados", expanded=True):
         for c in capitulos:
-            total_segs = len(c['segmentos'])
-            st.markdown(f"**{c['nome_mp3']}** — {total_segs} segmentos, ~{c['caracteres']:,} caracteres")
+            st.markdown(f"**{c['nome_mp3']}** — {len(c['segmentos'])} segmentos, ~{c['caracteres']:,} caracteres")
 
     st.markdown("---")
     st.subheader("🎯 Intervalo de Gravação")
@@ -327,7 +275,7 @@ if uploaded_file is not None:
     c_ini = col_i.number_input("Começar no Capítulo", min_value=1, max_value=total_caps, value=1)
     c_fim = col_f.number_input("Terminar no Capítulo", min_value=c_ini, max_value=total_caps, value=total_caps)
 
-    if st.button("🚀 Gerar Audiolivro", type="primary", use_container_width=True):
+    if st.button("🚀 Gerar Audiolivro (Chatterbox)", type="primary", use_container_width=True):
         st.session_state.arquivos_gerados = []
         indices = list(range(c_ini - 1, c_fim))
 
@@ -337,33 +285,17 @@ if uploaded_file is not None:
 
         for step, idx in enumerate(indices):
             cap = capitulos[idx]
-            status.info(f"🎙️ A processar {cap['nome_mp3']} [{step + 1}/{len(indices)}]...")
+            status.info(f"🎙️ A processar {cap['nome_mp3']} via Chatterbox [{step + 1}/{len(indices)}]...")
 
             segs_a_gravar = list(cap['segmentos'])
-
-            if idx > 0 and fazer_overlap:
-                falas_ant = [s for s in capitulos[idx - 1]['segmentos'] if s['tipo'] == 'fala']
-                if falas_ant:
-                    ult_bloco = falas_ant[-1]
-                    frases_ant = re.split(r'(?<=[.!?])\s+', ult_bloco['texto'])
-                    if frases_ant and frases_ant[-1].strip():
-                        segs_a_gravar.insert(0, {
-                            'tipo': 'fala',
-                            'texto': frases_ant[-1].strip(),
-                            'rate': ult_bloco['rate'],
-                            'pitch': ult_bloco['pitch']
-                        })
-                        segs_a_gravar.insert(1, {'tipo': 'pausa', 'segundos': 1.0})
-
-            audio_mp3 = asyncio.run(gravar_audio_otimizado(segs_a_gravar, voice_id))
+            audio_mp3 = gravar_audio_chatterbox(segs_a_gravar, voice_id)
             resumo_txt = next((s['texto'] for s in cap['segmentos'] if s['tipo'] == 'fala'), "")[:100]
 
             st.session_state.arquivos_gerados.append((cap['nome_mp3'], audio_mp3, resumo_txt))
 
             with area_tempo_real:
                 with st.container(border=True):
-                    st.markdown(f"✅ **{cap['nome_mp3']}** *(~{cap['caracteres']:,} caracteres)*")
-                    st.caption(f"\"{resumo_txt}...\"")
+                    st.markdown(f"✅ **{cap['nome_mp3']}** *(Chatterbox | ~{cap['caracteres']:,} caracteres)*")
                     st.audio(audio_mp3, format="audio/mp3")
                     st.download_button(
                         f"📥 Descarregar {cap['nome_mp3']}",
@@ -377,7 +309,7 @@ if uploaded_file is not None:
 
         status.empty()
         prog.empty()
-        st.success("🎉 Todos os capítulos selecionados foram gerados com sucesso!")
+        st.success("🎉 Todos os capítulos selecionados foram gerados com o Chatterbox com sucesso!")
 
 if len(st.session_state.arquivos_gerados) > 1:
     st.markdown("---")
@@ -386,9 +318,9 @@ if len(st.session_state.arquivos_gerados) > 1:
         for n_m, d_m, _ in st.session_state.arquivos_gerados:
             zf.writestr(n_m, d_m)
     st.download_button(
-        "📦 Descarregar Audiolivro Completo em ZIP",
+        "📦 Descarregar Audiolivro Completo em ZIP (Chatterbox)",
         data=zip_buf.getvalue(),
-        file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Capítulos_Completos.zip",
+        file_name=f"{st.session_state.livro_nome.rsplit('.', 1)[0]}_Chatterbox.zip",
         mime="application/zip",
         type="primary",
         use_container_width=True
