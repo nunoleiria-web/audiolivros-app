@@ -1,5 +1,6 @@
 streamlit
-pymupdf
-beautifulsoup4
 edge-tts
-google-cloud-texttospeech
+numpy
+pydub
+ffmpeg-python
+chatterbox-tts  # Adicionar esta linha
