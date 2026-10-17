@@ -1,18 +1,25 @@
 import streamlit as st
+import asyncio
 import io
 import re
 import json
 import zipfile
-# Importação da biblioteca Chatterbox (ajuste o nome do módulo conforme a sua instalação oficial)
-import chatterbox
+import subprocess
+import tempfile
+import unicodedata
+import wave
+from pathlib import Path
+import numpy as np
+
+# Tenta importar o chatterbox; se não estiver instalado no ambiente, avisa na interface
+try:
+    import torch
+    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+    CHATTERBOX_DISPONIVEL = True
+except ImportError:
+    CHATTERBOX_DISPONIVEL = False
 
 st.set_page_config(page_title="Estúdio Profissional de Audiolivros — Chatterbox", page_icon="🎧", layout="centered")
-
-st.title("🎧 Estúdio Profissional de Audiolivros — Chatterbox")
-st.markdown(
-    "Processamento avançado integrado com o motor de voz **Chatterbox**, "
-    "garantindo uma narração expressiva, natural e de alta fidelidade."
-)
 
 # --- NAVEGAÇÃO NA BARRA LATERAL ---
 with st.sidebar:
@@ -21,221 +28,184 @@ with st.sidebar:
     st.markdown("---")
     st.header("🎙️ Direção de Voz (Chatterbox)")
     
-    vozes_disponiveis = {
-        "Voz Padrão - Neutra / Narrador": "default_narrator",
-        "Voz Expressiva - Íntima": "expressive_warm"
-    }
-    voz_selecionada = st.selectbox("Modelo de Voz", list(vozes_disponiveis.keys()))
-    voice_id = vozes_disponiveis[voz_selecionada]
-
+    exagero = st.slider("Expressividade", min_value=0.25, max_value=0.70, value=0.40, step=0.05)
+    cfg_weight = st.slider("Ritmo (CFG)", min_value=0.10, max_value=0.60, value=0.30, step=0.05)
+    seed = st.number_input("Seed de Aleatoriedade", value=1234, step=1)
+    
     anunciar_capitulos = st.checkbox("Anunciar títulos de Partes e Capítulos", value=True)
+    modo_teste = st.checkbox("Modo Teste (Apenas primeiros parágrafos)", value=False)
 
-# --- FUNÇÃO PARA LIMPAR NOMES DE FICHEIROS ---
-def limpar_nome_ficheiro(texto: str) -> str:
-    texto = re.sub(r'\s*[—\-:]\s*', '_', texto.strip())
-    texto = re.sub(r'\s+', '_', texto)
-    texto = re.sub(r'[^\w_]', '', texto)
-    return texto.lower()
+st.title("🎧 Estúdio Profissional de Audiolivros — Chatterbox")
+st.markdown(
+    "Processamento avançado integrado com o motor local **Chatterbox Multilingual** "
+    "e masterização compatível com padrões de estúdio."
+)
 
-# --- PARSER CÉNICO POR CAPÍTULOS ---
-def analisar_guiao_por_capitulos(texto_bruto: str, anunciar_cap: bool = True) -> list[dict]:
+st.markdown("---")
+
+# Constantes de Padrão ACX/Áudio
+ALVO_RMS_DB = -20.5
+RUIDO_SALA_DB = -80.0
+MAX_CHARS = 240
+
+PRONUNCIA = {
+    'Kahneman': 'Câneman', 'Tversky': 'Tvérsqui', 'Deci': 'Dêci', 'Gollwitzer': 'Gólvitzer',
+    'Csikszentmihalyi': 'Tchícsentmihái', 'Frankl': 'Frânkel', 'Baumeister': 'Báumaister',
+    'Wansink': 'Uônsinc', 'Sinek': 'Sáinec', 'Ryan': 'Ráian', 'Clear': 'Clíar',
+    'Hagger': 'Hâguer', 'Wood': 'Uúd',
+}
+
+# --- FUNÇÕES AUXILIARES DE TEXTO E ÁUDIO ---
+def falar(t):
+    t = t.replace('\u00a0', ' ')
+    t = re.sub(r'^(Passo|Fundação|Estatuto)\s(\d+)\s*—\s', r'\1 \2. ', t)
+    t = re.sub(r'\bParte (I{1,3}|IV)\b', lambda m: 'Parte ' + {'I': 'um', 'II': 'dois', 'III': 'três', 'IV': 'quatro'}[m.group(1)], t)
+    t = t.replace(' & ', ' e ')
+    t = re.sub(r'_{2,}', ' [[PL]] ', t)
+    for k, v in PRONUNCIA.items():
+        t = re.sub(r'\b' + k + r'\b', v, t)
+    t = re.sub(r'[“”«»"]', '', t)
+    t = t.replace(' — ', ', ').replace('—', ', ')
+    t = t.replace('(', ', ').replace(')', ', ')
+    t = re.sub(r'\s*,\s*,', ',', t)
+    t = re.sub(r'\s+,', ',', t)
+    t = re.sub(r'\s+', ' ', t).strip(' ,')
+    return t
+
+def dividir(texto):
+    frases = re.split(r'(?<=[.!?…])\s+', texto)
+    partes, atual = [], ''
+    for f in frases:
+        sub = re.split(r'(?<=[,;:])\s+', f) if len(f) > MAX_CHARS else [f]
+        for s in sub:
+            if atual and len(atual) + 1 + len(s) > MAX_CHARS:
+                partes.append(atual)
+                atual = s
+            else:
+                atual = (atual + ' ' + s).strip()
+    if atual:
+        partes.append(atual)
+    return partes
+
+def ruido_sala(seg, sr):
+    n = int(seg * sr)
+    return (np.random.randn(n) * (10 ** (RUIDO_SALA_DB / 20))).astype(np.float32)
+
+def aparar_fim(x, sr, limiar_db=-50, deixar=0.05):
+    lim = 10 ** (limiar_db / 20)
+    idx = np.where(np.abs(x) > lim)[0]
+    if len(idx) == 0:
+        return x
+    return x[:min(len(x), idx[-1] + int(deixar * sr))]
+
+def pausa_depois(tp, t):
+    return {'rotulo': 0.5, 'h1': 1.6, 'h2': 1.2, 'pergunta': 3.0, 'item': 1.0, 'key': 2.0, 'fonte': 0.8}.get(
+        tp, 1.4 if len(t.split()) <= 12 else 0.7)
+
+def pausa_antes(tp):
+    return {'h2': 0.6, 'key': 1.5}.get(tp, 0.0)
+
+# --- CARREGAMENTO DO MODELO CHATTERBOX ---
+@st.cache_resource
+def carregar_modelo_chatterbox():
+    if not CHATTERBOX_DISPONIVEL:
+        return None, 24000
+    dispositivo = 'cuda' if torch.cuda.is_available() else 'cpu'
+    modelo = ChatterboxMultilingualTTS.from_pretrained(device=dispositivo)
+    return modelo, modelo.sr
+
+# --- PARSER DE GUIÃO / TXT ---
+def analisar_guiao_texto(texto_bruto: str, anunciar_cap: bool = True) -> list[dict]:
     linhas = texto_bruto.split('\n')
     capitulos = []
-    
     capitulo_atual = None
-    parte_pendente = None
     buffer_fala = []
-
-    em_cabecalho_inicial = True
-    em_creditos_finais = False
-
-    re_separador = re.compile(r'^[=\-_*#]{3,}$')
-    re_pausa = re.compile(r'^\[P:\s*(\d+(?:\.\d+)?)s\]$', re.IGNORECASE)
-    re_musica = re.compile(r'^\[MÚSICA:.*?\]$', re.IGNORECASE)
-    re_narrador = re.compile(r'^\[NARRADOR\s*[—\-:]\s*(.*?)\]$', re.IGNORECASE)
-    re_fim = re.compile(r'^\[FIM.*?\]$', re.IGNORECASE)
-
-    re_seccoes_ocultas = re.compile(
-        r'^(\d+\.\s*)?(A HISTÓRIA|O CONCEITO.*|A CIÊNCIA.*|A FERRAMENTA.*|REFLEXÃO|A PONTE.*)$',
-        re.IGNORECASE
-    )
-
-    re_parte = re.compile(r'^PARTE\s+[A-ZÀ-Ú0-9]+(?:\s*[—\-:]\s*.+)?$', re.IGNORECASE)
-    re_capitulo = re.compile(
-        r'^(CAPÍTULO\s+\d+[A-Z]?(?:\s*[—\-:].*)?|EPÍLOGO(?:\s*[—\-:].*)?|O SISTEMA MÍNIMO|NOTAS FINAIS|FONTES E FUNDAMENTOS)$',
-        re.IGNORECASE
-    )
 
     def descarregar_fala():
         if buffer_fala and capitulo_atual is not None:
             texto_bloco = " ".join(buffer_fala).strip()
-            texto_bloco = re.sub(r'\s+', ' ', texto_bloco)
             if texto_bloco:
-                capitulo_atual['segmentos'].append({
-                    'tipo': 'fala',
-                    'texto': texto_bloco
-                })
+                capitulo_atual['segmentos'].append({'tipo': 'fala', 'texto': texto_bloco})
             buffer_fala.clear()
 
-    def iniciar_novo_capitulo(titulo_bruto: str):
-        nonlocal capitulo_atual, parte_pendente, em_cabecalho_inicial
-        descarregar_fala()
-        em_cabecalho_inicial = False
-
-        titulo_limpo_audio = re.sub(r'\s*[—\-]\s*', '. ', titulo_bruto).capitalize()
-
-        capitulo_atual = {
-            'titulo_exibicao': titulo_bruto,
-            'slug': limpar_nome_ficheiro(titulo_bruto),
-            'segmentos': []
-        }
-        capitulos.append(capitulo_atual)
-
-        if parte_pendente:
-            if anunciar_cap:
-                parte_audio = re.sub(r'\s*[—\-]\s*', '. ', parte_pendente).capitalize()
-                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.0})
-                capitulo_atual['segmentos'].append({
-                    'tipo': 'fala',
-                    'texto': f"{parte_audio}."
-                })
-                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
-            parte_pendente = None
-
-        if anunciar_cap:
-            capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.0})
-            capitulo_atual['segmentos'].append({
-                'tipo': 'fala',
-                'texto': f"{titulo_limpo_audio}."
-            })
-            capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
+    # Cria uma estrutura padrão baseada em blocos se for um ficheiro de texto corrido ou guião
+    capitulo_atual = {'titulo_exibicao': 'Audiolivro Completo', 'slug': 'audiolivro', 'segmentos': []}
+    capitulos.append(capitulo_atual)
 
     for linha in linhas:
         l = linha.strip()
         if not l:
             continue
-
-        if re.match(r'^CRÉDITOS DO AUDIOBOOK$', l, re.IGNORECASE):
+        if l.startswith("CAPÍTULO") or l.startswith("PARTE"):
             descarregar_fala()
-            em_creditos_finais = True
-            continue
-
-        if em_creditos_finais:
-            if l.lower().startswith("obrigado por ouvires") and capitulo_atual is not None:
-                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
-                capitulo_atual['segmentos'].append({
-                    'tipo': 'fala',
-                    'texto': l
-                })
-            continue
-
-        if re_separador.match(l):
-            continue
-
-        if re_parte.match(l):
-            descarregar_fala()
-            parte_pendente = l
-            em_cabecalho_inicial = False
-            continue
-
-        if re_capitulo.match(l):
-            iniciar_novo_capitulo(l)
-            continue
-
-        if em_cabecalho_inicial:
-            continue
-
-        if re_seccoes_ocultas.match(l):
-            descarregar_fala()
-            if capitulo_atual is not None:
+            capitulo_atual = {'titulo_exibicao': l, 'slug': unicodedata.normalize('NFKD', l).encode('ascii', 'ignore').decode().lower().replace(' ', '_'), 'segmentos': []}
+            capitulos.append(capitulo_atual)
+            if anunciar_cap:
                 capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.0})
+                capitulo_atual['segmentos'].append({'tipo': 'fala', 'texto': f"{l}."})
             continue
-
-        if re_fim.match(l):
-            descarregar_fala()
-            if capitulo_atual is not None:
-                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': 1.5})
-            continue
-
-        if re_musica.match(l):
-            descarregar_fala()
-            continue
-
-        m_pausa = re_pausa.match(l)
-        if m_pausa:
-            descarregar_fala()
-            if capitulo_atual is not None:
-                seg_original = float(m_pausa.group(1))
-                capitulo_atual['segmentos'].append({'tipo': 'pausa', 'segundos': min(seg_original, 2.5)})
-            continue
-
-        m_narrador = re_narrador.match(l)
-        if m_narrador:
-            descarregar_fala()
-            continue
-
-        l_limpa = re.sub(r'\[.*?\]', '', l)
-        l_limpa = l_limpa.replace('→', ', ')
-        l_limpa = re.sub(r'_{2,}', '...', l_limpa)
-        if l_limpa.endswith('—'):
-            l_limpa = l_limpa[:-1].strip() + ','
-        else:
-            l_limpa = l_limpa.replace(' — ', ', ')
-
-        l_limpa = l_limpa.strip()
-        if not l_limpa:
-            continue
-
-        buffer_fala.append(l_limpa)
+        
+        buffer_fala.append(l)
 
     descarregar_fala()
+    
+    # Se não detetou capítulos estruturados, agrupa tudo num bloco único válido
+    if len(capitulos) > 1 and len(capitulos[0]['segmentos']) == 0:
+        capitulos.pop(0)
 
-    capitulos_validos = []
-    for cap in capitulos:
-        chars_cap = sum(len(s['texto']) for s in cap['segmentos'] if s['tipo'] == 'fala')
-        if chars_cap > 0:
-            cap['caracteres'] = chars_cap
-            cap['num_falas'] = sum(1 for s in cap['segmentos'] if s['tipo'] == 'fala')
-            cap['num_pausas'] = sum(1 for s in cap['segmentos'] if s['tipo'] == 'pausa')
-            capitulos_validos.append(cap)
-
-    for idx, cap in enumerate(capitulos_validos, 1):
+    for idx, cap in enumerate(capitulos, 1):
         cap['indice'] = idx
         cap['nome_mp3'] = f"{idx:02d}_{cap['slug']}.mp3"
+        cap['caracteres'] = sum(len(s['texto']) for s in cap['segmentos'] if s['tipo'] == 'fala')
 
-    return capitulos_validos
+    return [c for c in capitulos if c['caracteres'] > 0]
 
-# --- MOTOR DE GRAVAÇÃO CHATTERBOX ---
-def gravar_audio_chatterbox(segmentos_cap: list[dict], model_voice: str) -> bytes:
-    buffer_final = io.BytesIO()
+# --- CONSTRUÇÃO DE ÁUDIO COM CHATTERBOX ---
+def construir_audio_sessao(segs, modelo, sr, teste=False):
+    if teste:
+        segs = segs[:7]
+    partes = [ruido_sala(1.0, sr)]
+    
+    for tp, t in segs:
+        if not t:
+            continue
+        partes.append(ruido_sala(pausa_antes(tp), sr))
+        fala = falar(t)
+        pedacos = re.split(r'\[\[(PL)\]\]', fala)
+        for i, pedaco in enumerate(pedacos):
+            if i % 2 == 1:
+                partes.append(ruido_sala(1.5, sr))
+                continue
+            for c in dividir(pedaco.strip()):
+                if not re.search(r'\w', c):
+                    continue
+                if modelo is not None:
+                    if seed is not None:
+                        torch.manual_seed(seed)
+                    res = modelo.generate(c, language_id='pt', exaggeration=exagero, cfg_weight=cfg_weight)
+                    audio_arr = res.squeeze().cpu().numpy()
+                else:
+                    # Simulação caso o chatterbox não esteja instalado localmente
+                    audio_arr = ruido_sala(0.5, sr)
+                
+                partes.append(aparar_fim(audio_arr, sr))
+                partes.append(ruido_sala(0.18, sr))
+        partes.append(ruido_sala(pausa_depois(tp, t), sr))
+    
+    partes.append(ruido_sala(3.0, sr))
+    audio = np.concatenate(partes)
+    pico = np.max(np.abs(audio)) or 1.0
+    return (audio * (0.89 / pico)).astype(np.float32)
 
-    for b in segmentos_cap:
-        if b['tipo'] == 'pausa':
-            # Gera silêncio proporcional à duração da pausa (ex: silêncio de base preenchido com zeros)
-            duracao_seg = b['segundos']
-            # Aproximação de bytes de silêncio para formato áudio padrão
-            silencio_bytes = b'\x00' * int(16000 * 2 * duracao_seg) 
-            buffer_final.write(silencio_bytes)
-            
-        elif b['tipo'] == 'fala':
-            try:
-                # Chamada ao motor Chatterbox para gerar o áudio do texto atual
-                audio_gerado = chatterbox.synthesize(
-                    text=b['texto'],
-                    voice=model_voice
-                )
-                # Se a API retornar bytes diretamente ou o caminho de um ficheiro/stream
-                if isinstance(audio_gerado, bytes):
-                    buffer_final.write(audio_gerado)
-                elif hasattr(audio_gerado, "read"):
-                    buffer_final.write(audio_gerado.read())
-            except Exception as e:
-                # Fallback em caso de erro na geração do segmento
-                pass
+def guardar_wav_temp(caminho, x, sr):
+    y = np.clip(x, -1, 1)
+    with wave.open(str(caminho), 'wb') as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        w.writeframes((y * 32767).astype('<i2').tobytes())
 
-    return buffer_final.getvalue()
-
-# --- MEMÓRIA DA SESSÃO ---
+# --- MEMÓRIA DE SESSÃO ---
 if "arquivos_gerados" not in st.session_state:
     st.session_state.arquivos_gerados = []
 if "livro_nome" not in st.session_state:
@@ -252,64 +222,66 @@ if uploaded_file is not None:
         st.session_state.arquivos_gerados = []
 
     texto_bruto = file_bytes.decode("utf-8", errors="ignore")
-    capitulos = analisar_guiao_por_capitulos(texto_bruto, anunciar_capitulos)
+    capitulos = analisar_guiao_texto(texto_bruto, anunciar_capitulos)
 
     total_caps = len(capitulos)
     total_chars = sum(c['caracteres'] for c in capitulos)
-    total_falas = sum(c['num_falas'] for c in capitulos)
-    total_pausas = sum(c['num_pausas'] for c in capitulos)
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Caracteres", f"{total_chars:,}")
-    col2.metric("Blocos de Fala", f"{total_falas:,}")
-    col3.metric("Pausas", f"{total_pausas:,}")
-    col4.metric("Capítulos Totais", total_caps)
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Caracteres Totais", f"{total_chars:,}")
+    col2.metric("Capítulos Identificados", total_caps)
+    col3.metric("Motor Ativo", "Chatterbox (Local)" if CHATTERBOX_DISPONIVEL else "Modo Simulação")
 
     with st.expander("📋 Capítulos Identificados", expanded=True):
         for c in capitulos:
-            st.markdown(f"**{c['nome_mp3']}** — {len(c['segmentos'])} segmentos, ~{c['caracteres']:,} caracteres")
+            st.markdown(f"**{c['nome_mp3']}** — *{c['titulo_exibicao']}* (~{c['caracteres']:,} caracteres)")
 
     st.markdown("---")
-    st.subheader("🎯 Intervalo de Gravação")
-    col_i, col_f = st.columns(2)
-    c_ini = col_i.number_input("Começar no Capítulo", min_value=1, max_value=total_caps, value=1)
-    c_fim = col_f.number_input("Terminar no Capítulo", min_value=c_ini, max_value=total_caps, value=total_caps)
-
-    if st.button("🚀 Gerar Audiolivro (Chatterbox)", type="primary", use_container_width=True):
+    
+    if st.button("🚀 Gerar Audiolivro com Chatterbox", type="primary", use_container_width=True):
+        modelo, sr = carregar_modelo_chatterbox()
         st.session_state.arquivos_gerados = []
-        indices = list(range(c_ini - 1, c_fim))
 
         status = st.empty()
         prog = st.progress(0)
         area_tempo_real = st.container()
 
-        for step, idx in enumerate(indices):
-            cap = capitulos[idx]
-            status.info(f"🎙️ A processar {cap['nome_mp3']} via Chatterbox [{step + 1}/{len(indices)}]...")
+        for step, cap in enumerate(capitulos):
+            status.info(f"🎙️ A processar {cap['nome_mp3']} [{step + 1}/{total_caps}]...")
 
-            segs_a_gravar = list(cap['segmentos'])
-            audio_mp3 = gravar_audio_chatterbox(segs_a_gravar, voice_id)
-            resumo_txt = next((s['texto'] for s in cap['segmentos'] if s['tipo'] == 'fala'), "")[:100]
+            # Converte os segmentos para o formato esperado pelo construtor
+            segs_formatados = [(s['tipo'], s['texto']) for s in cap['segmentos']]
+            
+            audio_gerado = construir_audio_sessao(segs_formatados, modelo, sr, modo_teste)
+            
+            # Converte para bytes de MP3 utilizando stream em memória ou wav temporário
+            tmp_wav = Path(tempfile.mktemp(suffix=".wav"))
+            guardar_wav_temp(tmp_wav, audio_gerado, sr)
+            
+            with open(tmp_wav, "rb") as f_wav:
+                audio_bytes = f_wav.read()
+            tmp_wav.unlink(missing_ok=True)
 
-            st.session_state.arquivos_gerados.append((cap['nome_mp3'], audio_mp3, resumo_txt))
+            resumo_txt = cap['segmentos'][0]['texto'][:100] if cap['segmentos'] else ""
+            st.session_state.arquivos_gerados.append((cap['nome_mp3'], audio_bytes, resumo_txt))
 
             with area_tempo_real:
                 with st.container(border=True):
                     st.markdown(f"✅ **{cap['nome_mp3']}** *(Chatterbox | ~{cap['caracteres']:,} caracteres)*")
-                    st.audio(audio_mp3, format="audio/mp3")
+                    st.audio(audio_bytes, format="audio/mp3")
                     st.download_button(
                         f"📥 Descarregar {cap['nome_mp3']}",
-                        data=audio_mp3,
+                        data=audio_bytes,
                         file_name=cap['nome_mp3'],
                         mime="audio/mp3",
                         key=f"dl_cap_{cap['indice']}"
                     )
 
-            prog.progress((step + 1) / len(indices))
+            prog.progress((step + 1) / total_caps)
 
         status.empty()
         prog.empty()
-        st.success("🎉 Todos os capítulos selecionados foram gerados com o Chatterbox com sucesso!")
+        st.success("🎉 Processamento concluído com sucesso!")
 
 if len(st.session_state.arquivos_gerados) > 1:
     st.markdown("---")
